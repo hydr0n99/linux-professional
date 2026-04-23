@@ -1,0 +1,4 @@
+FATAL: String1
+NON-FATAL: String 2
+FATAL AGAIN: String 3
+NO-MORE-FATAL: String 4

@@ -1,0 +1,2 @@
+WORD="FATAL"
+LOG=/var/log/watchlog.log
