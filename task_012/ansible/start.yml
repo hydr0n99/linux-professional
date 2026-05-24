@@ -1,0 +1,24 @@
+---
+- hosts: all
+  become: true
+  vars:
+    nginx_port: 8080
+    nginx_server_name: "my-beautiful-server"
+  tasks:
+    - name: Install Nginx
+      ansible.builtin.package:
+        name: nginx
+        state: present
+      notify: Start Nginx
+    
+    - name: Create config from Jinja-template
+      ansible.builtin.template:
+        src: my-site.conf.j2
+        dest: /etc/nginx/conf.d/my-site.conf
+
+  handlers:
+    - name: Start Nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: started
+        enabled: true
