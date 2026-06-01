@@ -1,0 +1,20 @@
+Vagrant.configure("2") do |config|
+  config.vm.define "vagrant-test" do |vr|
+    vr.vm.box = "almalinux/9"
+
+    vr.vm.provider "virtualbox" do |vb|
+      vb.memory = 2048
+      vb.cpus = 1
+      vb.name = "vagrant-test"
+      vb.customize ['modifyvm', :id, '--audio', 'none']
+    end
+
+    vr.vm.disk :disk, size: "1GB", name: "disk1"
+    vr.vm.disk :disk, size: "1GB", name: "disk2"
+    vr.vm.disk :disk, size: "1GB", name: "disk3"
+
+    vr.vm.network(:forwarded_port, guest: 80, host: 8080)
+
+    vr.vm.provision "shell", path: "provision.sh"
+  end
+end
