@@ -1,0 +1,24 @@
+machines = [
+  { name: "log", ip: "192.168.56.15" },  
+  { name: "web", ip: "192.168.56.10" }
+]
+
+Vagrant.configure("2") do |config|
+  machines.each do |m|
+    config.vm.define m[:name] do |vr|
+      vr.vm.box = "debian/bookworm64"
+
+      vr.vm.network "private_network", ip: m[:ip]
+
+      vr.vm.provider "virtualbox" do |vb|
+        vb.memory = 2048
+        vb.cpus = 1
+        vb.name = m[:name]
+      end
+    end
+  end
+
+  config.vm.provision "ansible" do |ansible|
+    ansible.playbook = "ansible/provision.yml"
+  end
+end

@@ -1,0 +1,140 @@
+---
+- name: Configure node web
+  hosts: web
+  become: true
+  tasks:
+    - name: Set hostname
+      ansible.builtin.hostname:
+        name: web
+
+    - name: Install packages
+      ansible.builtin.package:
+        name:
+          - nginx
+          - rsyslog
+          - auditd
+          - audispd-plugins
+        state: present
+        update_cache: true
+
+    - name: Enable and start services
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - nginx
+        - rsyslog
+        - auditd
+
+    - name: Enable audit syslog plugin
+      ansible.builtin.replace:
+        path: /etc/audit/plugins.d/syslog.conf
+        regexp: '^active\s*=.*'
+        replace: 'active = yes'
+
+    - name: Configure audit syslog facility
+      ansible.builtin.replace:
+        path: /etc/audit/plugins.d/syslog.conf
+        regexp: '^args\s*=.*'
+        replace: 'args = LOG_INFO LOG_LOCAL5'
+
+    - name: Add syslog directives after error_log
+      ansible.builtin.replace:
+        path: /etc/nginx/nginx.conf
+        regexp: '^(\s*)error_log\s+/var/log/nginx/error\.log.*;'
+        replace: |
+          \1error_log /var/log/nginx/error_crit.log crit;
+          \1error_log  /var/log/nginx/error_info.log info;
+
+    - name: Configure auditd
+      ansible.builtin.copy:
+        dest: /etc/audit/rules.d/nginx.rules
+        content: |
+          -w /etc/nginx -p wa -k nginx-config
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Configure rsyslog listeners
+      ansible.builtin.copy:
+        dest: /etc/rsyslog.d/forward.conf
+        content: |
+          module(load="imfile")
+
+          input(type="imfile"
+                File="/var/log/nginx/access.log"
+                Tag="nginx_access"
+                Facility="local6")
+
+          input(type="imfile"
+                File="/var/log/nginx/error_info.log"
+                Tag="nginx_error"
+                Facility="local6")
+
+          if ($syslogfacility-text == "local5" and $msg contains "nginx-config") then {
+            action(type="omfwd" target="192.168.56.15" port="514" protocol="tcp")
+          }
+          local6.* @@192.168.56.15:514
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Load audit rules
+      ansible.builtin.command: augenrules --load
+      changed_when: false
+
+    - name: Restart services
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - rsyslog
+        - nginx
+        - auditd
+
+
+- name: Configure node log
+  hosts: log
+  become: true
+  tasks:
+    - name: Set hostname
+      ansible.builtin.hostname:
+        name: log
+
+    - name: Install Rsyslog
+      ansible.builtin.package:
+        name: rsyslog
+        state: present
+        update_cache: true
+    
+    - name: Create directory
+      ansible.builtin.file:
+        path: /var/log/rsyslog/
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Configure rsyslog listeners
+      ansible.builtin.copy:
+        dest: /etc/rsyslog.d/10-listener.conf
+        content: |
+          module(load="imudp")
+          input(type="imudp" port="514")
+
+          module(load="imtcp")
+          input(type="imtcp" port="514")
+
+          $template RemoteLogs,"/var/log/rsyslog/%HOSTNAME%/%PROGRAMNAME%.log"
+          *.* ?RemoteLogs
+          & stop
+        owner: root
+        group: root
+        mode: '0644'
+    
+    - name: Restart Rsyslog
+      ansible.builtin.systemd:
+        name: rsyslog
+        state: restarted
+        enabled: true
