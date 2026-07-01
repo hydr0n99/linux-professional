@@ -1,0 +1,218 @@
+---
+- name: Configure node backup
+  hosts: backup
+  become: true
+  tasks:
+    - name: Set hostname
+      ansible.builtin.hostname:
+        name: backup
+
+    - name: Install packages
+      ansible.builtin.package:
+        name: borgbackup 
+        state: present
+        update_cache: true
+
+    - name: Create borg user
+      ansible.builtin.user:
+        name: borg
+        comment: Borg backup user
+        shell: /bin/bash
+        home: /home/borg
+        create_home: true
+        state: present
+
+    - name: Create backup mount point
+      ansible.builtin.file:
+        path: /var/backup/
+        state: directory
+        owner: borg
+        group: borg
+        mode: '0755'
+
+    - name: Check backup disk filesystem
+      ansible.builtin.command: blkid -o value -s TYPE /dev/sdb
+      register: backup_disk_fs
+      changed_when: false
+      failed_when: false
+
+    - name: Create filesystem on backup disk
+      ansible.builtin.command: mkfs.ext4 -F /dev/sdb
+      when: backup_disk_fs.rc != 0
+
+    - name: Mount backup disk
+      ansible.posix.mount:
+        path: /var/backup
+        src: /dev/sdb
+        fstype: ext4
+        state: mounted
+
+    - name: Create borg repository directory
+      ansible.builtin.file:
+        path: /var/backup/repo # lost+found в корне мешает созданию репозитория
+        state: directory
+        owner: borg
+        group: borg
+        mode: '0755'
+
+    - name: Create borg SSH directory
+      ansible.builtin.file:
+        path: /home/borg/.ssh
+        state: directory
+        owner: borg
+        group: borg
+        mode: '0700'
+
+    - name: Create borg authorized keys file
+      ansible.builtin.file:
+        path: /home/borg/.ssh/authorized_keys
+        state: touch
+        owner: borg
+        group: borg
+        mode: '0600'
+
+- name: Configure node client
+  hosts: client
+  become: true
+  vars:
+    borg_client_user: root
+    borg_client_home: /root
+  tasks:
+    - name: Set hostname
+      ansible.builtin.hostname:
+        name: client
+
+    - name: Install packages
+      ansible.builtin.package:
+        name: borgbackup 
+        state: present
+        update_cache: true
+
+    - name: Create borg client SSH directory
+      ansible.builtin.file:
+        path: "{{ borg_client_home }}/.ssh"
+        state: directory
+        owner: "{{ borg_client_user }}"
+        group: "{{ borg_client_user }}"
+        mode: '0700'
+
+    - name: Generate SSH key pair for borg client user
+      community.crypto.openssh_keypair:
+        path: "{{ borg_client_home }}/.ssh/id_rsa"
+        type: rsa
+        size: 2048
+        owner: "{{ borg_client_user }}"
+        group: "{{ borg_client_user }}"
+        mode: '0600'
+        comment: "{{ borg_client_user }}@client"
+        state: present
+
+    - name: Read client public key
+      ansible.builtin.slurp:
+        src: "{{ borg_client_home }}/.ssh/id_rsa.pub"
+      register: borg_client_public_key
+
+- name: Add client key to backup
+  hosts: backup
+  become: true
+  tasks:
+    - name: Add borg client public key to borg authorized_keys
+      ansible.posix.authorized_key:
+        user: borg
+        key: "{{ hostvars['client']['borg_client_public_key']['content'] | b64decode }}"
+        state: present
+
+- name: Configure node client
+  hosts: client
+  become: true
+  vars:
+    borg_passphrase: "otus1234"
+    borg_client_user: root
+    borg_client_home: /root
+    borg_server_ip: "192.168.56.10"
+  tasks:
+    - name: Scan backup SSH host key
+      ansible.builtin.command: ssh-keyscan -H {{ borg_server_ip }}
+      register: backup_ssh_host_key
+      changed_when: false
+
+    - name: Add backup SSH host key to borg client user's known_hosts
+      ansible.builtin.known_hosts:
+        path: "{{ borg_client_home }}/.ssh/known_hosts"
+        name: "{{ borg_server_ip }}"
+        key: "{{ backup_ssh_host_key.stdout }}"
+
+    - name: Check borg repo
+      ansible.builtin.command: borg info borg@{{ borg_server_ip }}:/var/backup/repo
+      become_user: "{{ borg_client_user }}"
+      environment:
+        BORG_PASSPHRASE: "{{ borg_passphrase }}"
+      register: borg_repo_info
+      changed_when: false
+      failed_when: false
+
+    - name: Initialize borg repo
+      ansible.builtin.command: borg init --encryption=repokey borg@{{ borg_server_ip }}:/var/backup/repo
+      become_user: "{{ borg_client_user }}"
+      environment:
+        BORG_PASSPHRASE: "{{ borg_passphrase }}"
+      when: borg_repo_info.rc != 0
+
+    - name: Create borg-backup.service file
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/borg-backup.service
+        content: |
+          [Unit]
+          Description=Borg Backup
+
+          [Service]
+          Type=oneshot
+
+          StandardOutput=journal
+          StandardError=journal
+          SyslogIdentifier=borg-backup
+
+          Environment="BORG_PASSPHRASE={{ borg_passphrase }}"
+
+          Environment=REPO=borg@{{ borg_server_ip }}:/var/backup/repo
+          Environment=BACKUP_TARGET=/etc
+
+          ExecStart=/bin/borg create \
+              --stats                \
+              ${REPO}::etc-{now:%%Y-%%m-%%d_%%H:%%M:%%S} ${BACKUP_TARGET}
+          
+          ExecStart=/bin/borg check ${REPO}
+
+          ExecStart=/bin/borg prune \
+              --keep-daily  90      \
+              --keep-monthly 12     \
+              --keep-yearly  1       \
+              ${REPO}
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Create borg-backup.timer file
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/borg-backup.timer
+        content: |
+          [Unit]
+          Description=Borg Backup
+
+          [Timer]
+          OnBootSec=5min
+          OnUnitActiveSec=5min
+          Unit=borg-backup.service
+
+          [Install]
+          WantedBy=timers.target
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Enable and start systemd timer
+      ansible.builtin.systemd:
+        name: borg-backup.timer
+        enabled: true
+        state: started
+        daemon_reload: true
