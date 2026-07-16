@@ -1,0 +1,58 @@
+---
+- name: Configure network
+  hosts: all
+  become: true
+  tasks:
+    - name: Set up NAT on inetRouter
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      with_items:
+        - { src: "iptables_rules.ipv4", dest: "/etc/iptables_rules.ipv4", mode: "0644" }
+        - { src: "iptables_restore", dest: "/etc/network/if-pre-up.d/iptables", mode: "0755" }
+      when: inventory_hostname == "inetRouter"
+
+    - name: Find all the files in /etc/netplan
+      ansible.builtin.find:
+        paths: /etc/netplan
+        file_type: any
+        hidden: true
+        recurse: false
+      register: netplan_contents
+
+    - name: Remove everything from /etc/netplan
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ netplan_contents.files }}"
+
+    - name: Set up forward packages across routers
+      ansible.posix.sysctl:
+        name: net.ipv4.conf.all.forwarding
+        value: '1'
+        state: present
+      when: "'routers' in group_names"
+
+    - name: Disable default route
+      ansible.builtin.template:
+        src: 00-installer-config.yaml
+        dest: /etc/netplan/00-installer-config.yaml
+        owner: root
+        group: root
+        mode: "0644"
+      when: inventory_hostname != "inetRouter"
+
+    - name: Install host-specific network configuration
+      ansible.builtin.template:
+        src: "50-vagrant_{{ inventory_hostname }}.yaml"
+        dest: /etc/netplan/50-vagrant.yaml
+        owner: root
+        group: root
+        mode: "0600"
+    
+    - name: Restart all hosts
+      reboot:
+        reboot_timeout: 600
