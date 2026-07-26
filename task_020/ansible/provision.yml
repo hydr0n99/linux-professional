@@ -1,0 +1,113 @@
+---
+- name: Configure network
+  hosts: pxeserver
+  become: true
+  vars:
+    tftp_dir_path: "/srv/tftp"
+    images_path: "/srv/images"
+    autoinstall_files_dir: "/srv/ks"
+    archive_link: "https://releases.ubuntu.com/noble/ubuntu-24.04.4-netboot-amd64.tar.gz"
+    iso_image_link: "https://releases.ubuntu.com/noble/ubuntu-24.04.4-live-server-amd64.iso"
+  tasks:
+    - name: Disable ufw
+      ansible.builtin.systemd:
+        name: ufw
+        state: stopped
+        enabled: false
+
+    - name: Install dnsmasq and apache2
+      ansible.builtin.package:
+        name:
+          - dnsmasq
+          - apache2
+        state: present
+        update_cache: true
+
+    - name: Add PXE config
+      ansible.builtin.template:
+        src: "pxe.conf"
+        dest: "/etc/dnsmasq.d/pxe.conf"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Create directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ tftp_dir_path }}"
+        - "{{ images_path }}"
+        - "{{ autoinstall_files_dir }}"
+
+    - name: Download archive
+      ansible.builtin.get_url:
+        url: "{{ archive_link }}"
+        dest: "/tmp/archive.tar.gz"
+        mode: "0644"
+
+    - name: Extract archive
+      ansible.builtin.unarchive:
+        src: "/tmp/archive.tar.gz"
+        dest: "{{ tftp_dir_path }}"
+        remote_src: true
+
+    - name: Download ISO-image
+      ansible.builtin.get_url:
+        url: "{{ iso_image_link }}"
+        dest: "{{ images_path }}/image.iso"
+        mode: "0644"
+
+    - name: Add ks-server config
+      ansible.builtin.template:
+        src: "ks-server.conf"
+        dest: "/etc/apache2/sites-available/ks-server.conf"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Enable ks-server Apache site
+      ansible.builtin.command:
+        cmd: a2ensite ks-server.conf
+        creates: /etc/apache2/sites-enabled/ks-server.conf
+
+    - name: Add user-data file
+      ansible.builtin.template:
+        src: "user-data"
+        dest: "{{ autoinstall_files_dir }}/user-data"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Create meta-data file
+      ansible.builtin.file:
+        path: "{{ autoinstall_files_dir }}/meta-data"
+        state: touch
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Configure PXE
+      ansible.builtin.copy:
+        dest: /srv/tftp/amd64/pxelinux.cfg/default
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          DEFAULT install
+          LABEL install
+            KERNEL linux
+            INITRD initrd
+            APPEND root=/dev/ram0 ramdisk_size=5000000 ip=dhcp iso-url=http://10.0.0.20/srv/images/image.iso autoinstall ds=nocloud-net;s=http://10.0.0.20/srv/ks/
+
+    - name: Enable and restart services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: restarted
+        enabled: true
+      loop:
+        - apache2
+        - dnsmasq
