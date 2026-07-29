@@ -1,0 +1,123 @@
+---
+- name: Configure network
+  hosts: all
+  become: true
+  tasks:
+    - name: Set up NAT on inetRouter
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      with_items:
+        - { src: "iptables_rules.ipv4", dest: "/etc/iptables_rules.ipv4", mode: "0644" }
+        - { src: "iptables_restore", dest: "/etc/network/if-pre-up.d/iptables", mode: "0755" }
+      when: inventory_hostname == "inetRouter"
+
+    - name: Set up port forwarding on inetRouter2
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      with_items:
+        - { src: "iptables_rules_inetRouter2.ipv4", dest: "/etc/iptables_rules.ipv4", mode: "0644" }
+        - { src: "iptables_restore", dest: "/etc/network/if-pre-up.d/iptables", mode: "0755" }
+      when: inventory_hostname == "inetRouter2"
+
+    - name: Install port knocking packages
+      ansible.builtin.apt:
+        name: knockd
+        state: present
+        update_cache: true
+      when: inventory_hostname in ["inetRouter", "centralRouter"]
+
+    - name: Configure knockd on inetRouter
+      ansible.builtin.template:
+        src: knockd.conf
+        dest: /etc/knockd.conf
+        owner: root
+        group: root
+        mode: "0644"
+      when: inventory_hostname == "inetRouter"
+
+    - name: Enable knockd on inetRouter
+      ansible.builtin.lineinfile:
+        path: /etc/default/knockd
+        regexp: '^START_KNOCKD='
+        line: 'START_KNOCKD=1'
+      when: inventory_hostname == "inetRouter"
+
+    - name: Start knockd on inetRouter
+      ansible.builtin.service:
+        name: knockd
+        enabled: true
+        state: started
+      when: inventory_hostname == "inetRouter"
+
+    - name: Install knock SSH helper on centralRouter
+      ansible.builtin.template:
+        src: knock_ssh.sh
+        dest: /usr/local/bin/knock-ssh
+        owner: root
+        group: root
+        mode: "0755"
+      when: inventory_hostname == "centralRouter"
+
+    - name: Install nginx on centralServer
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        update_cache: true
+      when: inventory_hostname == "centralServer"
+
+    - name: Enable nginx on centralServer
+      ansible.builtin.service:
+        name: nginx
+        enabled: true
+        state: started
+      when: inventory_hostname == "centralServer"
+
+    - name: Find all the files in /etc/netplan
+      ansible.builtin.find:
+        paths: /etc/netplan
+        file_type: any
+        hidden: true
+        recurse: false
+      register: netplan_contents
+
+    - name: Remove everything from /etc/netplan
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ netplan_contents.files }}"
+
+    - name: Set up forward packages across routers
+      ansible.posix.sysctl:
+        name: net.ipv4.conf.all.forwarding
+        value: '1'
+        state: present
+      when: inventory_hostname in ["inetRouter", "inetRouter2", "centralRouter", "office1Router", "office2Router"]
+
+    - name: Disable default route
+      ansible.builtin.template:
+        src: 00-installer-config.yaml
+        dest: /etc/netplan/00-installer-config.yaml
+        owner: root
+        group: root
+        mode: "0644"
+      when: inventory_hostname not in ["inetRouter", "inetRouter2"]
+
+    - name: Install host-specific network configuration
+      ansible.builtin.template:
+        src: "50-vagrant_{{ inventory_hostname }}.yaml"
+        dest: /etc/netplan/50-vagrant.yaml
+        owner: root
+        group: root
+        mode: "0600"
+    
+    - name: Restart all hosts
+      reboot:
+        reboot_timeout: 600
