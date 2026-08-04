@@ -1,0 +1,38 @@
+symmetric_routing: false
+
+ospf_routers:
+  router1:
+    router_id: 1.1.1.1
+    interfaces:
+      - name: eth1
+        description: r1-r2
+        cost: 1000
+      - name: eth2
+        description: r1-r3
+      - name: eth3
+        description: net1
+        passive: true
+
+  router2:
+    router_id: 2.2.2.2
+    interfaces:
+      - name: eth1
+        description: r2-r1
+        cost: 1000
+        symmetric_only: true
+      - name: eth2
+        description: r2-r3
+      - name: eth3
+        description: net2
+        passive: true
+
+  router3:
+    router_id: 3.3.3.3
+    interfaces:
+      - name: eth1
+        description: r3-r2
+      - name: eth2
+        description: r3-r1
+      - name: eth3
+        description: net3
+        passive: true

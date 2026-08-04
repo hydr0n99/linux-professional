@@ -1,0 +1,31 @@
+{% set router = ospf_routers[inventory_hostname] %}
+frr version 10.7.0
+frr defaults traditional
+hostname {{ inventory_hostname }}
+log syslog informational
+no ipv6 forwarding
+service integrated-vtysh-config
+!
+{% for interface in router.interfaces %}
+interface {{ interface.name }}
+ description {{ interface.description }}
+ ip ospf area 0
+ ip ospf mtu-ignore
+{% if interface.cost is defined %}
+{% if not (interface.symmetric_only | default(false) | bool) or (symmetric_routing | bool) %}
+ ip ospf cost {{ interface.cost }}
+{% endif %}
+{% endif %}
+ ip ospf hello-interval 10
+ ip ospf dead-interval 30
+!
+{% endfor %}
+router ospf
+ ospf router-id {{ router.router_id }}
+{% for interface in router.interfaces %}
+{% if interface.passive | default(false) | bool %}
+ passive-interface {{ interface.name }}
+{% endif %}
+{% endfor %}
+!
+log file /var/log/frr/frr.log
