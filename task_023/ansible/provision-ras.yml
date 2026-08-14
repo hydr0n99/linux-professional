@@ -1,0 +1,237 @@
+- name: RAS
+  hosts: all
+  become: true
+  tasks:
+    - name: Install utils
+      ansible.builtin.package:
+        name:
+          - openvpn
+          - easy-rsa
+        state: present
+        update_cache: true
+
+    - name: Create OpenVPN PKI and certificates
+      when: inventory_hostname == "server"
+      block:
+        - name: Initialize OpenVPN PKI
+          ansible.builtin.command:
+            argv:
+              - /usr/share/easy-rsa/easyrsa
+              - init-pki
+            chdir: /etc/openvpn
+            creates: /etc/openvpn/pki
+
+        - name: Create certificate authority
+          ansible.builtin.command:
+            argv:
+              - /usr/share/easy-rsa/easyrsa
+              - build-ca
+              - nopass
+            chdir: /etc/openvpn
+            creates: /etc/openvpn/pki/index.txt
+          environment:
+            EASYRSA_BATCH: "1"
+            EASYRSA_REQ_CN: OpenVPN-CA
+
+        - name: Generate OpenVPN server certificate request
+          ansible.builtin.command:
+            argv:
+              - /usr/share/easy-rsa/easyrsa
+              - gen-req
+              - server
+              - nopass
+            chdir: /etc/openvpn
+            creates: /etc/openvpn/pki/reqs/server.req
+          environment:
+            EASYRSA_BATCH: "1"
+            EASYRSA_REQ_CN: rasvpn
+
+        - name: Sign OpenVPN server certificate
+          ansible.builtin.command:
+            argv:
+              - /usr/share/easy-rsa/easyrsa
+              - sign-req
+              - server
+              - server
+            chdir: /etc/openvpn
+            creates: /etc/openvpn/pki/issued/server.crt
+          environment:
+            EASYRSA_BATCH: "1"
+
+        - name: Generate Diffie-Hellman parameters
+          ansible.builtin.command:
+            argv:
+              - /usr/share/easy-rsa/easyrsa
+              - gen-dh
+            chdir: /etc/openvpn
+            creates: /etc/openvpn/pki/dh.pem
+
+        - name: Generate OpenVPN static authentication key
+          ansible.builtin.command:
+            argv:
+              - openvpn
+              - --genkey
+              - secret
+              - /etc/openvpn/ca.key
+            creates: /etc/openvpn/ca.key
+
+        - name: Generate OpenVPN client certificate request
+          ansible.builtin.command:
+            argv:
+              - /usr/share/easy-rsa/easyrsa
+              - gen-req
+              - client
+              - nopass
+            chdir: /etc/openvpn
+            creates: /etc/openvpn/pki/reqs/client.req
+          environment:
+            EASYRSA_BATCH: "1"
+            EASYRSA_REQ_CN: client
+
+        - name: Sign OpenVPN client certificate
+          ansible.builtin.command:
+            argv:
+              - /usr/share/easy-rsa/easyrsa
+              - sign-req
+              - client
+              - client
+            chdir: /etc/openvpn
+            creates: /etc/openvpn/pki/issued/client.crt
+          environment:
+            EASYRSA_BATCH: "1"
+
+        - name: Copy configs to hosts
+          ansible.builtin.template:
+            src: "server-ras.conf"
+            dest: /etc/openvpn/server.conf
+            mode: '0640'
+
+        - name: Copy sevice unit to hosts
+          ansible.builtin.template:
+            src: "openvpn@.service"
+            dest: "/etc/systemd/system/openvpn@.service"
+            mode: '0640'
+
+        - name: Start service
+          ansible.builtin.systemd_service:
+            name: "openvpn@server"
+            state: restarted
+            enabled: true
+            daemon_reload: true
+
+    - name: Create RAS client directory on localhost
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/ras-client"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+      when: inventory_hostname == "server"
+
+    - name: Fetch RAS client certificates and key from server
+      ansible.builtin.fetch:
+        src: "{{ item.src }}"
+        dest: "{{ playbook_dir }}/ras-client/{{ item.dest }}"
+        flat: true
+      loop:
+        - src: /etc/openvpn/pki/ca.crt
+          dest: ca.crt
+        - src: /etc/openvpn/pki/issued/client.crt
+          dest: client.crt
+        - src: /etc/openvpn/pki/private/client.key
+          dest: client.key
+      no_log: true
+      when: inventory_hostname == "server"
+
+- name: RAS Localhost
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: true
+  vars:
+    ras_client_dir: "{{ playbook_dir }}/ras-client"
+  tasks:
+    - name: Install OpenVPN on localhost
+      ansible.builtin.package:
+        name: openvpn
+        state: present
+      become: true
+
+    - name: Copy RAS client configuration to client directory
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/templates/client-ras.conf"
+        dest: "{{ ras_client_dir }}/client.conf"
+        owner: "{{ lookup('env', 'USER') }}"
+        mode: "0600"
+
+    - name: Set permissions on RAS client files
+      ansible.builtin.file:
+        path: "{{ ras_client_dir }}/{{ item.name }}"
+        owner: "{{ lookup('env', 'USER') }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - name: ca.crt
+          mode: "0644"
+        - name: client.crt
+          mode: "0644"
+        - name: client.key
+          mode: "0600"
+
+    - name: Start OpenVPN RAS client on localhost
+      ansible.builtin.command:
+        argv:
+          - openvpn
+          - --config
+          - client.conf
+          - --writepid
+          - "{{ ras_client_dir }}/openvpn.pid"
+          - --log
+          - "{{ ras_client_dir }}/openvpn.log"
+        chdir: "{{ ras_client_dir }}"
+      async: 300
+      poll: 0
+      register: openvpn_client_job
+      become: true
+
+    - name: Wait for OpenVPN initialization
+      ansible.builtin.wait_for:
+        path: "{{ ras_client_dir }}/openvpn.log"
+        search_regex: "Initialization Sequence Completed"
+        timeout: 30
+      become: true
+
+    - name: Test RAS tunnel and stop OpenVPN client
+      block:
+        - name: Ping OpenVPN server through RAS tunnel
+          ansible.builtin.command:
+            argv:
+              - ping
+              - -c
+              - "4"
+              - 10.10.10.1
+          register: ras_ping_result
+          changed_when: false
+          retries: 5
+          delay: 2
+          until: ras_ping_result.rc == 0
+
+        - name: Print RAS ping results
+          ansible.builtin.debug:
+            var: ras_ping_result.stdout
+      always:
+        - name: Stop OpenVPN RAS client on localhost
+          ansible.builtin.command:
+            argv:
+              - pkill
+              - -F
+              - "{{ ras_client_dir }}/openvpn.pid"
+          register: openvpn_stop_result
+          # changed_when: openvpn_stop_result.rc == 0
+          # failed_when: openvpn_stop_result.rc not in [0, 1]
+          become: true
+
+        - name: Remove OpenVPN RAS client PID file
+          ansible.builtin.file:
+            path: "{{ ras_client_dir }}/openvpn.pid"
+            state: absent
+          become: true

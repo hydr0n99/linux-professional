@@ -1,0 +1,121 @@
+- name: VPN
+  hosts: all
+  become: true
+  vars:
+    vpn_mode: tun
+  tasks:
+    - name: Install utils
+      ansible.builtin.package:
+        name:
+          - openvpn
+          - iperf3
+        state: present
+        update_cache: true
+
+    - name: Generate OpenVPN static key
+      ansible.builtin.command:
+        cmd: openvpn --genkey secret /etc/openvpn/static.key
+        creates: /etc/openvpn/static.key
+      when: inventory_hostname == "server"
+
+    - name: Read OpenVPN static key from server
+      ansible.builtin.slurp:
+        src: /etc/openvpn/static.key
+      register: openvpn_static_key
+      delegate_to: server
+      run_once: true
+      no_log: true
+
+    - name: Copy OpenVPN static key to client host
+      ansible.builtin.copy:
+        content: "{{ openvpn_static_key.content | b64decode }}"
+        dest: /etc/openvpn/static.key
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      when: inventory_hostname == "client"
+
+    - name: Copy configs to hosts
+      ansible.builtin.template:
+        src: "{{ inventory_hostname }}.conf.j2"
+        dest: "/etc/openvpn/{{ inventory_hostname }}.conf"
+        mode: '0640'
+
+    - name: Copy sevice unit to hosts
+      ansible.builtin.template:
+        src: "openvpn@.service"
+        dest: "/etc/systemd/system/openvpn@.service"
+        mode: '0640'
+
+    - name: Start service
+      ansible.builtin.systemd_service:
+        name: "openvpn@{{ inventory_hostname }}"
+        state: restarted
+        enabled: true
+        daemon_reload: true
+
+    - name: Remove previous iperf3 server log
+      ansible.builtin.file:
+        path: /tmp/iperf3-server.log
+        state: absent
+      when: inventory_hostname == "server"
+
+    - name: Start iperf3 server
+      ansible.builtin.command:
+        cmd: iperf3 -s --logfile /tmp/iperf3-server.log
+      async: 3600
+      poll: 0
+      changed_when: true
+      when: inventory_hostname == "server"
+
+    - name: Wait for iperf3 server from client
+      ansible.builtin.wait_for:
+        host: 10.10.10.1
+        port: 5201
+        timeout: 30
+      when: inventory_hostname == "client"
+
+    - name: Run iperf3 client through VPN
+      ansible.builtin.command:
+        cmd: iperf3 -c 10.10.10.1 -t 40 -i 5
+      register: iperf3_client_result
+      changed_when: false
+      failed_when: false
+      when: inventory_hostname == "client"
+
+    - name: Print iperf3 results
+      ansible.builtin.debug:
+        msg: |
+          {{ iperf3_client_result.stdout }}
+          {{ iperf3_client_result.stderr }}
+      when: inventory_hostname == "client"
+
+    - name: Stop iperf3 server
+      ansible.builtin.command:
+        cmd: pkill -x iperf3
+      register: iperf3_stop_result
+      changed_when: iperf3_stop_result.rc == 0
+      failed_when: iperf3_stop_result.rc not in [0, 1]
+      when: inventory_hostname == "server"
+
+    - name: Read iperf3 server results
+      ansible.builtin.command:
+        cmd: cat /tmp/iperf3-server.log
+      register: iperf3_server_result
+      changed_when: false
+      when: inventory_hostname == "server"
+
+    - name: Print iperf3 server results
+      ansible.builtin.debug:
+        var: iperf3_server_result.stdout
+      when: inventory_hostname == "server"
+
+    - name: Fail when iperf3 client test failed
+      ansible.builtin.fail:
+        msg: >-
+          iperf3 client failed with exit code {{ iperf3_client_result.rc }}:
+          {{ iperf3_client_result.stderr }}
+      when:
+        - inventory_hostname == "client"
+        - iperf3_client_result.rc != 0

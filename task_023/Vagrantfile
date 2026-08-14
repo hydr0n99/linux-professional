@@ -1,0 +1,55 @@
+MACHINES = {
+  :server => {
+        :box_name => "generic/debian12",
+        :vm_name => "server",
+        :net => [
+          {ip: "192.168.57.10", adapter: 3, netmask: "255.255.255.0"},
+          {ip: '192.168.56.10', adapter: 2},
+        ]
+  },
+
+  # :client => {
+  #       :box_name => "generic/debian12",
+  #       :vm_name => "client",
+  #       :net => [
+  #         {ip: "192.168.57.15", adapter: 3, netmask: "255.255.255.0"},
+  #         {ip: '192.168.56.15', adapter: 2},
+  #       ]
+  # },
+}
+
+VPN_LAB = MACHINES.key?(:server) && MACHINES.key?(:client)
+PROVISION_TARGET = VPN_LAB ? :client : :server
+PROVISION_PLAYBOOK = VPN_LAB ? "ansible/provision-vpn.yml" : "ansible/provision-ras.yml"
+
+Vagrant.configure("2") do |config|
+
+  MACHINES.each do |boxname, boxconfig|
+    
+    config.vm.define boxname do |box|
+   
+      box.vm.box = boxconfig[:box_name]
+      box.vm.hostname = boxconfig[:vm_name]
+
+      box.vm.provider "virtualbox" do |v|
+        v.memory = 768
+        v.cpus = 1
+        v.customize ["modifyvm", :id, "--cpuexecutioncap", "60"]
+       end
+
+      if boxname == PROVISION_TARGET
+       box.vm.provision "ansible" do |ansible|
+        ansible.playbook = PROVISION_PLAYBOOK
+        ansible.host_key_checking = "false"
+        ansible.limit = VPN_LAB ? "all" : "all,localhost"
+        ansible.ask_become_pass = true unless VPN_LAB
+       end
+      end
+
+      boxconfig[:net].each do |ipconf|
+        box.vm.network "private_network", **ipconf
+      end
+
+     end
+  end
+end
