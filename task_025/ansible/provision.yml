@@ -1,0 +1,89 @@
+- name: Base set up
+  hosts: all
+  become: true
+  tasks:
+    - name: Install tools
+      ansible.builtin.package:
+        name:
+          - vim
+          - traceroute
+          - tcpdump
+          - net-tools
+        state: present
+        update_cache: true
+
+- name: Set up VLAN1
+  hosts: testClient1, testServer1
+  become: true
+  tasks:
+    - name: Set up VLAN1
+      ansible.builtin.template:
+        src: ifcfg-vlan1.j2
+        dest: /etc/sysconfig/network-scripts/ifcfg-vlan1
+        owner: root
+        group: root
+        mode: 0644
+
+    - name: Restart network for VLAN1
+      ansible.builtin.service:
+        name: NetworkManager
+        state: restarted
+
+- name: Set up VLAN2
+  hosts: testClient2,testServer2
+  become: true
+  tasks:
+    - name: Install Netplan
+      ansible.builtin.apt:
+        name: netplan.io
+        state: present
+        update_cache: true
+
+    - name: Ensure Netplan directory exists
+      ansible.builtin.file:
+        path: /etc/netplan
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Set up vlan2
+      ansible.builtin.template:
+        src: 50-cloud-init.yaml.j2
+        dest: /etc/netplan/50-cloud-init.yaml
+        owner: root
+        group: root
+        mode: 0644
+
+    - name: Apply Netplan VLAN2
+      ansible.builtin.shell: netplan apply
+      become: true
+
+- name: Set up bond0
+  hosts: inetRouter, centralRouter
+  become: true
+  tasks:
+    - name: Set up ifcfg-bond0
+      ansible.builtin.template:
+        src: ifcfg-bond0.j2
+        dest: /etc/sysconfig/network-scripts/ifcfg-bond0
+        owner: root
+        group: root
+        mode: 0644
+
+    - name: Set up eth1,eth2
+      ansible.builtin.template:
+        src: ifcfg-eth.j2
+        dest: "/etc/sysconfig/network-scripts/ifcfg-{{ interface }}"
+        owner: root
+        group: root
+        mode: 0644
+      loop:
+        - eth1
+        - eth2
+      loop_control:
+        loop_var: interface
+
+    - name: Restart hosts for bond0
+      ansible.builtin.reboot:
+        reboot_timeout: 3600
