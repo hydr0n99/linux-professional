@@ -1,0 +1,9 @@
+ipa_domain: otus.lan
+ipa_realm: OTUS.LAN
+ipa_server_hostname: ipa.otus.lan
+ipa_server_ip: 192.168.57.10
+
+ipa_admin_login: "admin"
+
+ipa_dm_password: "12345678"
+ipa_admin_password: "87654321"
