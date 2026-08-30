@@ -1,0 +1,181 @@
+---
+- name: Install and configure MySQL
+  hosts: all
+  become: true
+  tasks:
+    - name: Disable AlmaLinux MySQL module
+      ansible.builtin.command: dnf -y module disable mysql
+      changed_when: false
+
+    - name: Install Percona repository package
+      ansible.builtin.dnf:
+        name: https://repo.percona.com/yum/percona-release-latest.noarch.rpm
+        state: present
+        disable_gpg_check: true
+
+    - name: Enable Percona Server 8.0 repository
+      ansible.builtin.command: percona-release setup ps-80
+      changed_when: false
+
+    - name: Install Percona Server for MySQL 8.0
+      ansible.builtin.dnf:
+        name:
+          - percona-server-server
+          - percona-server-client
+        state: present
+
+    - name: Render MySQL configuration templates
+      ansible.builtin.template:
+        src: "{{ item }}"
+        dest: "/etc/my.cnf.d/{{ item | basename | regex_replace('\\.j2$', '') }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop: "{{ query('ansible.builtin.fileglob', 'templates/*.cnf.j2') }}"
+
+    - name: Copy MySQL replication configuration to the remote hosts
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: /etc/my.cnf.d/
+        owner: root
+        group: root
+        mode: '0644'
+      loop: "{{ query('ansible.builtin.fileglob', 'files/*.cnf') }}"
+    
+    - name: Include additional MySQL configuration directory
+      ansible.builtin.lineinfile:
+        path: /etc/my.cnf
+        line: "!includedir /etc/my.cnf.d"
+        insertafter: EOF
+
+    - name: Start MySQL
+      ansible.builtin.service:
+        name: mysql
+        state: restarted
+        enabled: true
+
+    - name: Get temporary MySQL root password
+      ansible.builtin.shell: >
+        grep 'root@localhost:' /var/log/mysqld.log | awk '{print $13}'
+      register: mysql_temporary_password
+      changed_when: false
+
+    - name: Set initial MySQL root password
+      ansible.builtin.command:
+        argv:
+          - mysql
+          - --connect-expired-password
+          - -uroot
+          - "-p{{ mysql_temporary_password.stdout }}"
+          - -e
+          - "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mysql_root_password }}';"
+      no_log: true
+
+    - name: Create bet database
+      ansible.builtin.command:
+        argv:
+          - mysql
+          - --protocol=socket
+          - "--socket={{ mysql_socket }}"
+          - -uroot
+          - "-p{{ mysql_root_password }}"
+          - -e
+          - "CREATE DATABASE IF NOT EXISTS bet;"
+      changed_when: false
+      no_log: true
+
+- name: Configure master host
+  hosts: master
+  become: true
+  tasks:
+    - name: Copy bet dump
+      ansible.builtin.copy:
+        src: bet.dmp
+        dest: /root/bet.dmp
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Import bet dump
+      ansible.builtin.shell: >-
+        mysql --protocol=socket --socket={{ mysql_socket }} -uroot
+        -p'{{ mysql_root_password }}' bet < /root/bet.dmp
+      no_log: true
+
+    - name: Create replication user
+      ansible.builtin.command:
+        argv:
+          - mysql
+          - --protocol=socket
+          - "--socket={{ mysql_socket }}"
+          - -uroot
+          - "-p{{ mysql_root_password }}"
+          - -e
+          - >-
+            CREATE USER IF NOT EXISTS 'repl'@'%' IDENTIFIED BY '{{ mysql_repl_password }}';
+            GRANT REPLICATION SLAVE ON *.* TO 'repl'@'%';
+            FLUSH PRIVILEGES;
+      no_log: true
+
+    - name: Create selective replication dump
+      ansible.builtin.shell: >-
+        mysqldump --protocol=socket --socket={{ mysql_socket }} -uroot
+        -p'{{ mysql_root_password }}' --single-transaction --set-gtid-purged=ON
+        bet {{ mysql_replication_tables | join(' ') }} > /root/bet-replication.sql
+      no_log: true
+
+    - name: Download dump to Ansible controller
+      ansible.builtin.fetch:
+        src: /root/bet-replication.sql
+        dest: /tmp/bet-replication.sql
+        flat: true
+
+- name: Configure slave host
+  hosts: slave
+  become: true
+  tasks:
+    - name: Upload dump to slave
+      ansible.builtin.copy:
+        src: /tmp/bet-replication.sql
+        dest: /tmp/bet-replication.sql
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Import seed dump from master
+      ansible.builtin.shell: >-
+        mysql --protocol=socket --socket={{ mysql_socket }}
+        -uroot -p'{{ mysql_root_password }}' bet
+        < /tmp/bet-replication.sql
+      no_log: true
+
+    - name: Configure GTID replication source
+      ansible.builtin.command:
+        argv:
+          - mysql
+          - --protocol=socket
+          - "--socket={{ mysql_socket }}"
+          - -uroot
+          - "-p{{ mysql_root_password }}"
+          - -e
+          - >-
+            CHANGE REPLICATION SOURCE TO
+            SOURCE_HOST='{{ hostvars["master"].ansible_host }}',
+            SOURCE_PORT=3306,
+            SOURCE_USER='repl',
+            SOURCE_PASSWORD='{{ mysql_repl_password }}',
+            SOURCE_AUTO_POSITION=1,
+            GET_SOURCE_PUBLIC_KEY=1;
+      no_log: true
+
+    - name: Start replica
+      ansible.builtin.command:
+        argv:
+          - mysql
+          - --protocol=socket
+          - "--socket={{ mysql_socket }}"
+          - -uroot
+          - "-p{{ mysql_root_password }}"
+          - -e
+          - "START REPLICA;"
+      no_log: true

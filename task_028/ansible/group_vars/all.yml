@@ -1,0 +1,9 @@
+mysql_socket: /var/lib/mysql/mysql.sock
+mysql_root_password: "RootPass_2026"
+mysql_repl_password: "!Otus2026"
+mysql_replication_tables:
+  - bookmaker
+  - competition
+  - market
+  - odds
+  - outcome
