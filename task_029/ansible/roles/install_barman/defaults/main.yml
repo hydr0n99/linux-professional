@@ -1,0 +1,5 @@
+---
+install_barman_primary_ip: '192.168.56.11'
+install_barman_ip: '192.168.56.13'
+install_barman_user: 'barman'
+install_barman_user_password: 'Otus2026!'

@@ -1,0 +1,12 @@
+- name: Install postgres 14 and set up replication
+  hosts: node1,node2
+  become: true
+  roles:
+    - install_postgres
+    - postgres_replication
+
+- name: Set up backup
+  hosts: all
+  become: true
+  roles:
+    - install_barman

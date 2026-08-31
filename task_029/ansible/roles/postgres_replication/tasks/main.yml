@@ -1,0 +1,108 @@
+---
+- name: Install base tools
+  ansible.builtin.package:
+    name:
+      - acl
+      - python3-pexpect
+      - python3-psycopg2
+    state: present
+    update_cache: true
+
+- name: Copy postgresql.conf
+  ansible.builtin.template:
+    src: postgresql.conf.j2
+    dest: /etc/postgresql/14/main/postgresql.conf
+    owner: postgres
+    group: postgres
+    mode: '0600'
+  when: (ansible_hostname == "node1")
+
+- name: Copy pg_hba.conf
+  ansible.builtin.template:
+    src: pg_hba.conf.j2
+    dest: /etc/postgresql/14/main/pg_hba.conf
+    owner: postgres
+    group: postgres
+    mode: '0600'
+  when: (ansible_hostname == "node1")
+
+- name: Restart postgresql-server on node1
+  ansible.builtin.service:
+    name: postgresql@14-main
+    state: restarted
+  when: (ansible_hostname == "node1")
+
+- name: Wait for PostgreSQL
+  ansible.builtin.wait_for:
+    path: /var/run/postgresql/.s.PGSQL.5432
+    timeout: 30
+  when: ansible_hostname == "node1"
+
+- name: Create replicator user
+  become_user: postgres
+  postgresql_user:
+    name: replication
+    password: '{{ postgres_replication_password }}'
+    role_attr_flags: REPLICATION 
+  when: (ansible_hostname == "node1")
+
+- name: Create replication slot for node2
+  become: true
+  become_user: postgres
+  community.postgresql.postgresql_slot:
+    name: "{{ postgres_replication_standby_slot }}"
+    slot_type: physical
+    state: present
+  when: ansible_hostname == "node1"
+
+- name: Stop postgresql-server on node2
+  ansible.builtin.service:
+    name: postgresql@14-main
+    state: stopped
+  when: (ansible_hostname == "node2")
+
+- name: Remove files from data catalog
+  ansible.builtin.file:
+    path: /var/lib/postgresql/14/main/
+    state: absent
+  when: (ansible_hostname == "node2")
+
+- name: Copy files from primary to standby
+  become: true
+  become_user: postgres
+  ansible.builtin.expect:
+    command: >-
+      pg_basebackup
+      -h {{ postgres_replication_primary_ip }}
+      -U {{ postgres_replication_user }}
+      -p 5432
+      -D /var/lib/postgresql/14/main/
+      -R -P
+      -S {{ postgres_replication_standby_slot }}
+    responses:
+      '.*Password*': "{{ postgres_replication_password }}"
+  when: ansible_hostname == "node2"
+
+- name: Copy postgresql.conf
+  ansible.builtin.template:
+    src: postgresql.conf.j2
+    dest: /etc/postgresql/14/main/postgresql.conf
+    owner: postgres
+    group: postgres
+    mode: '0600'
+  when: (ansible_hostname == "node2")
+
+- name: Copy pg_hba.conf
+  ansible.builtin.template:
+    src: pg_hba.conf.j2
+    dest: /etc/postgresql/14/main/pg_hba.conf
+    owner: postgres
+    group: postgres
+    mode: '0600'
+  when: (ansible_hostname == "node2")
+
+- name: Start postgresql-server on node2
+  ansible.builtin.service:
+    name: postgresql@14-main
+    state: started
+  when: (ansible_hostname == "node2")

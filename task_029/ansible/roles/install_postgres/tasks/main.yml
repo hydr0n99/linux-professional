@@ -1,0 +1,14 @@
+- name: Install postgresql-server 14
+  ansible.builtin.package:
+    name:
+      - postgresql
+      - postgresql-contrib
+    state: present
+    update_cache: true
+
+- name: Enable and start service
+  ansible.builtin.service:
+    name: postgresql@14-main
+    state: started
+    enabled: true
+  when: ansible_hostname == "node1"

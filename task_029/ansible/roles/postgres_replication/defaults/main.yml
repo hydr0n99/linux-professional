@@ -1,0 +1,5 @@
+postgres_replication_user: replication
+postgres_replication_password: 'Otus2026!'
+postgres_replication_primary_ip: '192.168.56.11'
+postgres_replication_standby_ip: '192.168.56.12'
+postgres_replication_standby_slot: node2
