@@ -1,0 +1,74 @@
+- name: Setup server
+  hosts: AppServer
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Install packages required for the Docker repository
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+        state: present
+        update_cache: true
+      tags:
+        - docker
+
+    - name: Create directory for APT repository keys
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+      tags:
+        - docker
+
+    - name: Install Docker repository signing key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/debian/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+        force: true
+      tags:
+        - docker
+
+    - name: Configure the Docker repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/debian bookworm stable
+        filename: docker
+        state: present
+        update_cache: true
+      tags:
+        - docker
+
+    - name: Install Docker Engine and Compose plugin
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+      tags:
+        - docker
+
+    - name: Add vagrant user to the docker group
+      ansible.builtin.user:
+        name: vagrant
+        groups:
+          - docker
+        append: true
+      tags:
+        - docker
+
+    - name: Copy project
+      copy: src=project dest=/home/vagrant
+
+    - name: Reset ssh connection
+      meta: reset_connection
+
+    - name: Run container
+      shell:
+        cmd: "docker compose -f docker-compose.yml up -d"
+        chdir: /home/vagrant/project

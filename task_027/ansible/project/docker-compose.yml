@@ -1,0 +1,80 @@
+services:
+  gateway:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+      - "8082:8082"
+      - "8083:8083"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - flask
+      - wordpress
+      - react
+    networks:
+      - frontend
+
+  flask:
+    build:
+      context: ./flask
+    restart: unless-stopped
+    expose:
+      - "5000"
+    networks:
+      - frontend
+
+  wordpress:
+    image: wordpress:6-apache
+    restart: unless-stopped
+    environment:
+      WORDPRESS_DB_HOST: mysql:3306
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: ${WORDPRESS_DB_PASSWORD:-wordpress}
+    volumes:
+      - wordpress_data:/var/www/html
+    depends_on:
+      mysql:
+        condition: service_healthy
+    expose:
+      - "80"
+    networks:
+      - frontend
+      - wordpress_backend
+
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: wordpress
+      MYSQL_USER: wordpress
+      MYSQL_PASSWORD: ${WORDPRESS_DB_PASSWORD:-wordpress}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-me}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - wordpress_backend
+
+  react:
+    build:
+      context: ./react
+    restart: unless-stopped
+    expose:
+      - "80"
+    networks:
+      - frontend
+
+networks:
+  frontend:
+  wordpress_backend:
+
+volumes:
+  wordpress_data:
+  mysql_data:
