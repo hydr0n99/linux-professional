@@ -1,0 +1,39 @@
+#!/usr/bin/python3
+import json
+import logging
+import syslog
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class AlertHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        if self.path != "/alerts":
+            self.send_error(404)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length))
+            for alert in payload.get("alerts", []):
+                labels = alert.get("labels", {})
+                annotations = alert.get("annotations", {})
+                message = (
+                    f"status={alert.get('status', payload.get('status', 'unknown'))} "
+                    f"alert={labels.get('alertname', 'unknown')} "
+                    f"instance={labels.get('instance', 'unknown')} "
+                    f"summary={annotations.get('summary', '')}"
+                )
+                syslog.openlog("alertmanager-webhook")
+                syslog.syslog(syslog.LOG_WARNING, message)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok\n")
+        except (ValueError, json.JSONDecodeError) as error:
+            logging.exception("invalid Alertmanager payload: %s", error)
+            self.send_error(400)
+
+    def log_message(self, fmt, *args):
+        syslog.openlog("alertmanager-webhook-http")
+        syslog.syslog(syslog.LOG_INFO, fmt % args)
+
+
+ThreadingHTTPServer(("{{ logger_ip }}", 9095), AlertHandler).serve_forever()

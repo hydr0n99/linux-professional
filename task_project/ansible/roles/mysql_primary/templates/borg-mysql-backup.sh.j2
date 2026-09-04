@@ -1,0 +1,31 @@
+#!/bin/bash
+set -euo pipefail
+
+export BORG_REPO='{{ borg_user }}@{{ backup_ip }}:/var/backup/db'
+export BORG_PASSPHRASE='{{ borg_passphrase }}'
+export BORG_RSH='ssh -i {{ borg_private_key_path }} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/root/.ssh/known_hosts.borg'
+
+dump=/var/backups/project/{{ wordpress_database }}.sql
+mysqldump --protocol=socket \
+  --single-transaction --routines --events \
+  --set-gtid-purged=ON --databases '{{ wordpress_database }}' >"${dump}.tmp"
+mv "${dump}.tmp" "$dump"
+
+if ! borg info >/dev/null 2>&1; then
+  borg break-lock >/dev/null 2>&1 || true
+  if ! borg info >/dev/null 2>&1; then
+    borg init --encryption=repokey-blake2
+  fi
+fi
+
+borg create --stats --compression lz4 \
+  '::{hostname}-{now:%Y-%m-%dT%H:%M:%S}' /var/backups/project
+borg prune --list --keep-hourly 24 --keep-daily 7 --keep-weekly 4 --keep-monthly 6
+borg compact
+
+timestamp=$(date +%s)
+metric=/var/lib/prometheus/node-exporter/backup.prom
+printf 'project_backup_last_success_timestamp_seconds %s\n' "$timestamp" >"${metric}.tmp"
+chown prometheus:prometheus "${metric}.tmp"
+chmod 0644 "${metric}.tmp"
+mv "${metric}.tmp" "$metric"

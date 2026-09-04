@@ -1,0 +1,53 @@
+---
+management_network: "192.168.60.0/24"
+dmz_network: "192.168.61.0/24"
+internal_network: "192.168.62.0/24"
+
+front_dmz_ip: "192.168.61.11"
+front_internal_ip: "192.168.62.11"
+back1_internal_ip: "192.168.62.12"
+back2_internal_ip: "192.168.62.13"
+mysql_primary_ip: "192.168.62.14"
+mysql_replica_ip: "192.168.62.15"
+monitor_ip: "192.168.62.16"
+logger_ip: "192.168.62.17"
+backup_ip: "192.168.62.18"
+
+wordpress_database: "wordpress"
+wordpress_database_user: "wordpress"
+wordpress_database_password: "wordpress"
+wordpress_admin_user: admin
+wordpress_admin_password: "WordPress_Admin_2026!"
+wordpress_admin_email: admin@example.test
+wordpress_title: "Highly Available WordPress"
+wordpress_public_url: "https://192.168.61.11"
+
+mysql_replication_user: repl
+mysql_replication_password: "MySQL_Repl_2026!"
+
+grafana_admin_user: admin
+grafana_admin_password: "Grafana_Admin_2026!"
+grafana_version: "13.2.1"
+grafana_build: "33191028959"
+grafana_deb_checksum: "sha256:b4f088f661c5103746f23cb5cbbe2b2bb2e18ba9870ad68a3c2a90451f511ded"
+grafana_deb_url: >-
+  https://github.com/grafana/grafana/releases/download/v{{ grafana_version }}/grafana_{{ grafana_version }}_{{ grafana_build }}_linux_amd64.deb
+
+alertmanager_telegram_bot_token: "8770056398:AAHJEAAN_ADbjv5-FbPM54yF4BATlHy0mF8"
+alertmanager_telegram_chat_id: 479275398
+
+loki_version: "3.7.2"
+loki_deb_url: >-
+  https://github.com/grafana/loki/releases/download/v{{ loki_version }}/loki_{{ loki_version }}_amd64.deb
+loki_deb_checksum: "sha256:24bdf038ae47ac716fb65e1f5caacde11fb7055eeccf2e7160cce42b6fd47ad9"
+loki_log_retention: 336h
+
+alloy_version: "1.18.0"
+alloy_deb_url: >-
+  https://github.com/grafana/alloy/releases/download/v{{ alloy_version }}/alloy-{{ alloy_version }}-1.amd64.deb
+alloy_deb_checksum: "sha256:6ba1cfba4e9de4d3cbc94eaf8cdeb769898fcbfae12e8c2fea39b178ecd05f52"
+
+borg_user: borg
+borg_passphrase: "Borg_Project_2026!"
+borg_private_key_path: /root/.ssh/id_ed25519_borg
+borg_backup_interval: 15min

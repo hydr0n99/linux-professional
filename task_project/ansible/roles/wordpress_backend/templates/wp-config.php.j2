@@ -1,0 +1,33 @@
+<?php
+define('DB_NAME', '{{ wordpress_database }}');
+define('DB_USER', '{{ wordpress_database_user }}');
+define('DB_PASSWORD', '{{ wordpress_database_password }}');
+define('DB_HOST', '{{ mysql_primary_ip }}:3306');
+define('DB_CHARSET', 'utf8mb4');
+define('DB_COLLATE', '');
+
+define('AUTH_KEY',         'project-auth-key-2026-change-in-production');
+define('SECURE_AUTH_KEY',  'project-secure-auth-key-2026-change-in-production');
+define('LOGGED_IN_KEY',    'project-logged-in-key-2026-change-in-production');
+define('NONCE_KEY',        'project-nonce-key-2026-change-in-production');
+define('AUTH_SALT',        'project-auth-salt-2026-change-in-production');
+define('SECURE_AUTH_SALT', 'project-secure-auth-salt-2026-change-in-production');
+define('LOGGED_IN_SALT',   'project-logged-in-salt-2026-change-in-production');
+define('NONCE_SALT',       'project-nonce-salt-2026-change-in-production');
+
+$table_prefix = 'wp_';
+define('WP_DEBUG', false);
+define('DISALLOW_FILE_EDIT', true);
+define('WP_HOME', '{{ wordpress_public_url }}');
+define('WP_SITEURL', '{{ wordpress_public_url }}');
+define('FORCE_SSL_ADMIN', true);
+
+if (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) &&
+    strpos($_SERVER['HTTP_X_FORWARDED_PROTO'], 'https') !== false) {
+    $_SERVER['HTTPS'] = 'on';
+}
+
+if (!defined('ABSPATH')) {
+    define('ABSPATH', __DIR__ . '/');
+}
+require_once ABSPATH . 'wp-settings.php';

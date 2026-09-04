@@ -1,0 +1,93 @@
+---
+- name: Install Borg and SSH server
+  ansible.builtin.apt:
+    name:
+      - borgbackup
+      - openssh-server
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Enable the SSH server
+  ansible.builtin.systemd:
+    name: ssh
+    state: started
+    enabled: true
+
+- name: Create the restricted Borg account
+  ansible.builtin.user:
+    name: "{{ borg_user }}"
+    groups: vagrant
+    append: true
+    shell: /bin/bash
+    home: "/home/{{ borg_user }}"
+    create_home: true
+    state: present
+
+- name: Create Borg repository directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: vagrant
+    group: vagrant
+    mode: "0775"
+  loop:
+    - /var/backup/db
+
+- name: Create the Borg SSH directory
+  ansible.builtin.file:
+    path: "/home/{{ borg_user }}/.ssh"
+    state: directory
+    owner: "{{ borg_user }}"
+    group: "{{ borg_user }}"
+    mode: "0700"
+
+- name: Create the Borg authorized_keys file
+  ansible.builtin.file:
+    path: "/home/{{ borg_user }}/.ssh/authorized_keys"
+    state: touch
+    owner: "{{ borg_user }}"
+    group: "{{ borg_user }}"
+    mode: "0600"
+    modification_time: preserve
+    access_time: preserve
+
+- name: Check whether the database host is available
+  ansible.builtin.wait_for:
+    host: "{{ hostvars['db'].ansible_host }}"
+    port: 22
+    connect_timeout: 1
+    timeout: 5
+  register: backup_server_db_reachable
+  failed_when: false
+  changed_when: false
+
+- name: Inspect the database Borg public key
+  ansible.builtin.stat:
+    path: "{{ borg_private_key_path }}.pub"
+  register: backup_server_db_key
+  delegate_to: db
+  when: backup_server_db_reachable.state | default('') == 'started'
+
+- name: Read the database Borg public key
+  ansible.builtin.slurp:
+    src: "{{ borg_private_key_path }}.pub"
+  register: backup_server_db_public_key
+  delegate_to: db
+  when:
+    - backup_server_db_key is defined
+    - backup_server_db_key.stat.exists | default(false)
+
+- name: Authorize database backups with path restriction
+  ansible.builtin.lineinfile:
+    path: "/home/{{ borg_user }}/.ssh/authorized_keys"
+    line: >-
+      command="borg serve --restrict-to-path /var/backup/db",restrict
+      {{ backup_server_db_public_key.content | b64decode | trim }}
+    owner: "{{ borg_user }}"
+    group: "{{ borg_user }}"
+    mode: "0600"
+  when:
+    - backup_server_db_public_key is defined
+    - backup_server_db_public_key.content is defined
+  notify: Create initial archive from database

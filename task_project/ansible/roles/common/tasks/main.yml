@@ -1,0 +1,67 @@
+---
+- name: Set the expected hostname
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
+
+- name: Install common observability packages
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - rsyslog
+      - prometheus-node-exporter
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Enable node_exporter textfile directory
+  ansible.builtin.file:
+    path: /var/lib/prometheus/node-exporter
+    state: directory
+    owner: prometheus
+    group: prometheus
+    mode: "0755"
+
+- name: Enable the node_exporter textfile collector
+  ansible.builtin.copy:
+    dest: /etc/default/prometheus-node-exporter
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      ARGS="--collector.textfile.directory=/var/lib/prometheus/node-exporter"
+  notify: Restart node exporter
+
+- name: Create the reliable rsyslog queue directory
+  ansible.builtin.file:
+    path: /var/spool/rsyslog
+    state: directory
+    owner: root
+    group: adm
+    mode: "0770"
+
+- name: Forward system logs to the central log host
+  ansible.builtin.template:
+    src: central-rsyslog.conf.j2
+    dest: /etc/rsyslog.d/60-central.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when: inventory_hostname != 'logger'
+  notify: Restart rsyslog
+
+- name: Remove log forwarding on the central logger itself
+  ansible.builtin.file:
+    path: /etc/rsyslog.d/60-central.conf
+    state: absent
+  when: inventory_hostname == 'logger'
+  notify: Restart rsyslog
+
+- name: Enable common services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop:
+    - prometheus-node-exporter
+    - rsyslog

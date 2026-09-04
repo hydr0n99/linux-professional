@@ -1,0 +1,112 @@
+MACHINES = {
+  front: {
+    box_name: "generic/debian12",
+    memory: 1536,
+    cpu_cap: 45,
+    networks: [
+      ["192.168.60.11", 2],
+      ["192.168.61.11", 3],
+      ["192.168.62.11", 4]
+    ]
+  },
+  back1: {
+    box_name: "generic/debian12",
+    memory: 1536,
+    cpu_cap: 40,
+    networks: [
+      ["192.168.60.12", 2],
+      ["192.168.62.12", 3]
+    ]
+  },
+  back2: {
+    box_name: "generic/debian12",
+    memory: 1536,
+    cpu_cap: 40,
+    networks: [
+      ["192.168.60.13", 2],
+      ["192.168.62.13", 3]
+    ]
+  },
+  db: {
+    box_name: "generic/debian12",
+    memory: 2048,
+    cpu_cap: 70,
+    networks: [
+      ["192.168.60.14", 2],
+      ["192.168.62.14", 3]
+    ]
+  },
+  replica: {
+    box_name: "generic/debian12",
+    memory: 2048,
+    cpu_cap: 50,
+    networks: [
+      ["192.168.60.15", 2],
+      ["192.168.62.15", 3]
+    ]
+  },
+  monitor: {
+    box_name: "generic/debian12",
+    memory: 2048,
+    cpu_cap: 70,
+    networks: [
+      ["192.168.60.16", 2],
+      ["192.168.62.16", 3]
+    ]
+  },
+  logger: {
+    box_name: "generic/debian12",
+    memory: 4096,
+    cpu_cap: 60,
+    networks: [
+      ["192.168.60.17", 2],
+      ["192.168.62.17", 3]
+    ]
+  },
+  backup: {
+    box_name: "generic/debian12",
+    memory: 1024,
+    cpu_cap: 25,
+    networks: [
+      ["192.168.60.18", 2],
+      ["192.168.62.18", 3]
+    ]
+  }
+}.freeze
+
+Vagrant.configure("2") do |config|
+  config.vm.box_check_update = false
+
+  MACHINES.each do |name, machine|
+    config.vm.define name do |box|
+      box.vm.box = machine[:box_name]
+      box.vm.hostname = name.to_s
+
+      box.vm.provider "virtualbox" do |provider|
+        provider.memory = machine[:memory]
+        provider.cpus = 1
+        provider.customize ["modifyvm", :id, "--cpuexecutioncap", machine[:cpu_cap].to_s]
+      end
+
+      box.vm.provision "ansible" do |ansible|
+        ansible.playbook = "ansible/provision.yml"
+        ansible.host_key_checking = false
+        ansible.become = true
+        ansible.verbose = "v"
+      end
+
+      machine[:networks].each do |address, adapter|
+        box.vm.network "private_network",
+                       ip: address,
+                       adapter: adapter,
+                       netmask: "255.255.255.0"
+      end
+
+      if name == :backup
+        box.vm.synced_folder "backup-data", "/var/backup",
+                             owner: "vagrant", group: "vagrant",
+                             mount_options: ["dmode=0775", "fmode=0664"]
+      end
+    end
+  end
+end

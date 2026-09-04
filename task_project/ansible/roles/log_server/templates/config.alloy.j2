@@ -1,0 +1,68 @@
+local.file_match "remote_logs" {
+  path_targets = [{
+    "__path__" = "/var/log/remote/*/*.log",
+    "job"      = "central-rsyslog",
+    "source"   = "rsyslog",
+  }]
+  sync_period = "10s"
+}
+
+discovery.relabel "remote_logs" {
+  targets = local.file_match.remote_logs.targets
+
+  rule {
+    source_labels = ["__path__"]
+    regex         = "/var/log/remote/([^/]+)/([^/]+)\\.log"
+    replacement   = "$1"
+    target_label  = "instance"
+  }
+
+  rule {
+    source_labels = ["__path__"]
+    regex         = "/var/log/remote/([^/]+)/([^/]+)\\.log"
+    replacement   = "$2"
+    target_label  = "service"
+  }
+}
+
+loki.source.file "remote_logs" {
+  targets       = discovery.relabel.remote_logs.output
+  forward_to    = [loki.write.local.receiver]
+  tail_from_end = false
+}
+
+loki.relabel "journal" {
+  forward_to = []
+
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__journal_syslog_identifier"]
+    regex         = "(.+)"
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__journal_priority_keyword"]
+    target_label  = "level"
+  }
+}
+
+loki.source.journal "local" {
+  forward_to    = [loki.write.local.receiver]
+  relabel_rules = loki.relabel.journal.rules
+  labels        = {
+    "instance" = constants.hostname,
+    "source"   = "journal",
+  }
+  max_age = "24h"
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://{{ logger_ip }}:3100/loki/api/v1/push"
+  }
+}

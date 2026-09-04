@@ -1,0 +1,21 @@
+module(load="imfile")
+global(workDirectory="/var/spool/rsyslog")
+
+input(
+  type="imfile"
+  File="/var/log/nginx/*.log"
+  Tag="nginx-file:"
+  Severity="info"
+  Facility="local6"
+)
+
+action(
+  type="omfwd"
+  target="{{ logger_ip }}"
+  port="514"
+  protocol="tcp"
+  action.resumeRetryCount="-1"
+  queue.type="LinkedList"
+  queue.filename="central-forward"
+  queue.saveOnShutdown="on"
+)

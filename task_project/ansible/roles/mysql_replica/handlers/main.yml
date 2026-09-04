@@ -1,0 +1,10 @@
+---
+- name: Restart replica MySQL
+  ansible.builtin.systemd:
+    name: mysql
+    state: restarted
+
+- name: Restart rsyslog for replica MySQL
+  ansible.builtin.systemd:
+    name: rsyslog
+    state: restarted

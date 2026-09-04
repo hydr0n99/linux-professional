@@ -1,0 +1,6 @@
+---
+- name: Create initial archive from database
+  ansible.builtin.systemd:
+    name: borg-mysql-backup.service
+    state: started
+  delegate_to: db

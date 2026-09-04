@@ -1,0 +1,193 @@
+---
+- name: Remove the unavailable Grafana APT repository configuration
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/sources.list.d/grafana.list
+    - /etc/apt/keyrings/grafana.asc
+
+- name: Install native monitoring services
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - prometheus
+      - prometheus-alertmanager
+      - prometheus-blackbox-exporter
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Download the pinned Grafana Debian package
+  ansible.builtin.get_url:
+    url: "{{ grafana_deb_url }}"
+    dest: "/var/cache/apt/archives/grafana_{{ grafana_version }}_amd64.deb"
+    owner: root
+    group: root
+    mode: "0644"
+    checksum: "{{ grafana_deb_checksum }}"
+
+- name: Install the pinned Grafana Debian package
+  ansible.builtin.apt:
+    deb: "/var/cache/apt/archives/grafana_{{ grafana_version }}_amd64.deb"
+    state: present
+
+- name: Create monitoring data and provisioning directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /var/lib/prometheus/metrics2, owner: prometheus, group: prometheus, mode: "0755" }
+    - { path: /var/lib/prometheus/alertmanager, owner: prometheus, group: prometheus, mode: "0755" }
+    - { path: /etc/grafana/provisioning/datasources, owner: root, group: grafana, mode: "0755" }
+    - { path: /etc/grafana/provisioning/dashboards, owner: root, group: grafana, mode: "0755" }
+    - { path: /var/lib/grafana/dashboards, owner: grafana, group: grafana, mode: "0755" }
+
+- name: Configure Prometheus service arguments
+  ansible.builtin.template:
+    src: prometheus-default.j2
+    dest: /etc/default/prometheus
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart Prometheus
+
+- name: Configure Alertmanager service arguments
+  ansible.builtin.template:
+    src: alertmanager-default.j2
+    dest: /etc/default/prometheus-alertmanager
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart Alertmanager
+
+- name: Configure Blackbox Exporter service arguments
+  ansible.builtin.template:
+    src: blackbox-default.j2
+    dest: /etc/default/prometheus-blackbox-exporter
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart Blackbox Exporter
+
+- name: Install Prometheus configuration
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: /etc/prometheus/prometheus.yml
+    owner: root
+    group: prometheus
+    mode: "0640"
+  notify: Restart Prometheus
+
+- name: Install Prometheus alert rules
+  ansible.builtin.template:
+    src: alert-rules.yml.j2
+    dest: /etc/prometheus/alert-rules.yml
+    owner: root
+    group: prometheus
+    mode: "0640"
+  notify: Restart Prometheus
+
+- name: Install Alertmanager configuration
+  ansible.builtin.template:
+    src: alertmanager.yml.j2
+    dest: /etc/prometheus/alertmanager.yml
+    owner: root
+    group: prometheus
+    mode: "0640"
+  notify: Restart Alertmanager
+
+- name: Install Blackbox Exporter configuration
+  ansible.builtin.template:
+    src: blackbox.yml.j2
+    dest: /etc/prometheus/blackbox.yml
+    owner: root
+    group: prometheus
+    mode: "0640"
+  notify: Restart Blackbox Exporter
+
+- name: Install Grafana configuration
+  ansible.builtin.template:
+    src: grafana.ini.j2
+    dest: /etc/grafana/grafana.ini
+    owner: root
+    group: grafana
+    mode: "0640"
+  notify: Restart Grafana
+
+- name: Provision Grafana datasource and dashboard provider
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: grafana
+    mode: "0644"
+  loop:
+    - src: grafana-datasource.yml.j2
+      dest: /etc/grafana/provisioning/datasources/prometheus.yml
+    - src: grafana-dashboard-provider.yml.j2
+      dest: /etc/grafana/provisioning/dashboards/project.yml
+  notify: Restart Grafana
+
+- name: Provision the Grafana dashboards
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: grafana
+    group: grafana
+    mode: "0644"
+  loop:
+    - src: project-dashboard.json.j2
+      dest: /var/lib/grafana/dashboards/project.json
+    - src: logs-dashboard.json.j2
+      dest: /var/lib/grafana/dashboards/logs.json
+  notify: Restart Grafana
+
+- name: Validate Prometheus configuration
+  ansible.builtin.command:
+    argv:
+      - promtool
+      - check
+      - config
+      - /etc/prometheus/prometheus.yml
+  changed_when: false
+
+- name: Validate Alertmanager configuration
+  ansible.builtin.command:
+    argv:
+      - amtool
+      - check-config
+      - /etc/prometheus/alertmanager.yml
+  changed_when: false
+
+- name: Enable native monitoring services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+  loop:
+    - prometheus
+    - prometheus-alertmanager
+    - prometheus-blackbox-exporter
+    - grafana-server
+
+- name: Apply pending monitoring configuration
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for monitoring HTTP endpoints
+  ansible.builtin.uri:
+    url: "{{ item }}"
+    status_code: 200
+  register: monitoring_endpoint
+  retries: 30
+  delay: 2
+  until: monitoring_endpoint.status == 200
+  loop:
+    - http://127.0.0.1:9090/-/ready
+    - http://127.0.0.1:9093/-/ready
+    - http://127.0.0.1:9115/
+    - http://127.0.0.1:3000/api/health

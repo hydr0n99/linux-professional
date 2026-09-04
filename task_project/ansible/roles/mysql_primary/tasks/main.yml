@@ -1,0 +1,387 @@
+---
+- name: Install MySQL APT repository prerequisites
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - gnupg
+      - debconf-utils
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the APT keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the Oracle MySQL repository signing key
+  ansible.builtin.get_url:
+    url: https://repo.mysql.com/RPM-GPG-KEY-mysql-2025
+    dest: /etc/apt/keyrings/mysql.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure the Oracle MySQL 8.0 repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch=amd64 signed-by=/etc/apt/keyrings/mysql.asc]
+      http://repo.mysql.com/apt/debian/ bookworm mysql-8.0
+    filename: mysql-community
+    state: present
+    update_cache: true
+
+- name: Install native MySQL and backup tooling
+  ansible.builtin.apt:
+    name:
+      - mysql-server
+      - mysql-client
+      - borgbackup
+      - openssh-client
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create primary service directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /var/backups/project, owner: root, group: root, mode: "0700" }
+    - { path: /root/.ssh, owner: root, group: root, mode: "0700" }
+
+- name: Detect an existing primary data set
+  ansible.builtin.stat:
+    path: /var/lib/mysql/.project-ready
+  register: mysql_primary_ready
+
+- name: Install primary MySQL configuration
+  ansible.builtin.template:
+    src: mysql-primary.cnf.j2
+    dest: /etc/mysql/mysql.conf.d/90-project.cnf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart primary MySQL
+
+- name: Forward the native MySQL error log through rsyslog
+  ansible.builtin.copy:
+    dest: /etc/rsyslog.d/70-mysql-file.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      input(
+        type="imfile"
+        File="/var/log/mysql/error.log"
+        Tag="mysql-db:"
+        Severity="error"
+        Facility="local5"
+      )
+  notify: Restart rsyslog for primary MySQL
+
+- name: Enable native primary MySQL
+  ansible.builtin.systemd:
+    name: mysql
+    state: started
+    enabled: true
+
+- name: Apply primary MySQL configuration before health checks
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait until primary MySQL accepts local connections
+  ansible.builtin.command:
+    argv:
+      - mysqladmin
+      - --protocol=socket
+      - ping
+      - --silent
+  register: mysql_primary_health
+  changed_when: false
+  retries: 40
+  delay: 3
+  until: mysql_primary_health.rc == 0
+
+- name: Ensure application and replication accounts exist
+  ansible.builtin.command:
+    argv:
+      - mysql
+      - --protocol=socket
+      - -e
+      - >-
+        CREATE DATABASE IF NOT EXISTS `{{ wordpress_database }}`;
+        CREATE USER IF NOT EXISTS '{{ wordpress_database_user }}'@'%'
+          IDENTIFIED BY '{{ wordpress_database_password }}';
+        ALTER USER '{{ wordpress_database_user }}'@'%'
+          IDENTIFIED BY '{{ wordpress_database_password }}';
+        GRANT ALL PRIVILEGES ON `{{ wordpress_database }}`.*
+          TO '{{ wordpress_database_user }}'@'%';
+        CREATE USER IF NOT EXISTS '{{ mysql_replication_user }}'@'%'
+          IDENTIFIED WITH caching_sha2_password BY '{{ mysql_replication_password }}';
+        ALTER USER '{{ mysql_replication_user }}'@'%'
+          IDENTIFIED WITH caching_sha2_password BY '{{ mysql_replication_password }}';
+        GRANT REPLICATION SLAVE ON *.* TO '{{ mysql_replication_user }}'@'%';
+        FLUSH PRIVILEGES;
+  changed_when: false
+
+- name: Check whether the surviving replica is reachable
+  ansible.builtin.wait_for:
+    host: "{{ mysql_replica_ip }}"
+    port: 3306
+    connect_timeout: 1
+    timeout: 3
+  register: mysql_primary_replica_reachable
+  failed_when: false
+  changed_when: false
+  when: not mysql_primary_ready.stat.exists
+
+- name: Recover a rebuilt primary from the surviving replica
+  when:
+    - not mysql_primary_ready.stat.exists
+    - mysql_primary_replica_reachable is defined
+    - mysql_primary_replica_reachable.state | default('') == 'started'
+  block:
+    - name: Dump WordPress data on the replica
+      ansible.builtin.shell: >-
+        mysqldump --protocol=socket
+        --single-transaction --set-gtid-purged=OFF
+        --databases {{ wordpress_database }}
+        > /tmp/wordpress-primary-recovery.sql
+      args:
+        executable: /bin/bash
+      delegate_to: replica
+      changed_when: true
+
+    - name: Fetch the recovery dump to the controller
+      ansible.builtin.fetch:
+        src: /tmp/wordpress-primary-recovery.sql
+        dest: /tmp/wordpress-primary-recovery.sql
+        flat: true
+      delegate_to: replica
+
+    - name: Upload the recovery dump to the new primary
+      ansible.builtin.copy:
+        src: /tmp/wordpress-primary-recovery.sql
+        dest: /tmp/wordpress-primary-recovery.sql
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Import the replica data into the new primary
+      ansible.builtin.shell: >-
+        mysql --protocol=socket
+        < /tmp/wordpress-primary-recovery.sql
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Read the new primary GTID set
+      ansible.builtin.command:
+        argv:
+          - mysql
+          - --protocol=socket
+          - --batch
+          - --skip-column-names
+          - -e
+          - SELECT @@GLOBAL.gtid_executed
+      register: mysql_primary_rebuilt_gtid
+      changed_when: false
+
+    - name: Point the surviving replica to the rebuilt primary
+      ansible.builtin.command:
+        argv:
+          - mysql
+          - --protocol=socket
+          - -e
+          - >-
+            SET GLOBAL super_read_only=OFF;
+            SET GLOBAL read_only=OFF;
+            STOP REPLICA;
+            RESET REPLICA ALL;
+            RESET MASTER;
+            SET GLOBAL gtid_purged='{{ mysql_primary_rebuilt_gtid.stdout }}';
+            CHANGE REPLICATION SOURCE TO
+              SOURCE_HOST='{{ mysql_primary_ip }}',
+              SOURCE_PORT=3306,
+              SOURCE_USER='{{ mysql_replication_user }}',
+              SOURCE_PASSWORD='{{ mysql_replication_password }}',
+              SOURCE_AUTO_POSITION=1,
+              GET_SOURCE_PUBLIC_KEY=1;
+            START REPLICA;
+            SET GLOBAL read_only=ON;
+            SET GLOBAL super_read_only=ON;
+      delegate_to: replica
+      changed_when: true
+
+- name: Mark primary initialization as complete
+  ansible.builtin.file:
+    path: /var/lib/mysql/.project-ready
+    state: touch
+    owner: root
+    group: root
+    mode: "0600"
+    modification_time: preserve
+    access_time: preserve
+
+- name: Install the MySQL metrics collector
+  ansible.builtin.template:
+    src: mysql-metrics.sh.j2
+    dest: /usr/local/sbin/mysql-project-metrics
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Install the MySQL metrics service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/mysql-project-metrics.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Export project MySQL state for node_exporter
+      After=mysql.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/mysql-project-metrics
+
+- name: Install the MySQL metrics timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/mysql-project-metrics.timer
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Collect project MySQL metrics every 30 seconds
+
+      [Timer]
+      OnBootSec=30s
+      OnUnitActiveSec=30s
+      Unit=mysql-project-metrics.service
+
+      [Install]
+      WantedBy=timers.target
+
+- name: Generate the Borg client key
+  ansible.builtin.command:
+    argv:
+      - ssh-keygen
+      - -q
+      - -t
+      - ed25519
+      - -N
+      - ""
+      - -C
+      - root@db-borg
+      - -f
+      - "{{ borg_private_key_path }}"
+  args:
+    creates: "{{ borg_private_key_path }}"
+
+- name: Install the database backup script
+  ansible.builtin.template:
+    src: borg-mysql-backup.sh.j2
+    dest: /usr/local/sbin/borg-mysql-backup
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Install the database backup service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/borg-mysql-backup.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Create a consistent MySQL backup in Borg
+      After=mysql.service network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/borg-mysql-backup
+      StandardOutput=journal
+      StandardError=journal
+      SyslogIdentifier=borg-mysql-backup
+
+- name: Install the database backup timer
+  ansible.builtin.template:
+    src: borg-mysql-backup.timer.j2
+    dest: /etc/systemd/system/borg-mysql-backup.timer
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Enable MySQL maintenance timers
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+  loop:
+    - mysql-project-metrics.timer
+    - borg-mysql-backup.timer
+
+- name: Check whether the backup server is ready
+  ansible.builtin.wait_for:
+    host: "{{ backup_ip }}"
+    port: 22
+    connect_timeout: 1
+    timeout: 3
+  register: mysql_primary_backup_server_reachable
+  failed_when: false
+  changed_when: false
+
+- name: Authorize the current database backup key
+  when: mysql_primary_backup_server_reachable.state | default('') == 'started'
+  block:
+    - name: Check whether the Borg account exists on the backup server
+      ansible.builtin.command:
+        argv:
+          - getent
+          - passwd
+          - "{{ borg_user }}"
+      delegate_to: backup
+      register: mysql_primary_backup_borg_account
+      changed_when: false
+      failed_when: false
+
+    - name: Inspect the Borg SSH directory on the backup server
+      ansible.builtin.stat:
+        path: "/home/{{ borg_user }}/.ssh"
+      delegate_to: backup
+      register: mysql_primary_backup_borg_ssh_directory
+      when: mysql_primary_backup_borg_account.rc == 0
+
+    - name: Read the database Borg public key
+      ansible.builtin.slurp:
+        src: "{{ borg_private_key_path }}.pub"
+      register: mysql_primary_borg_public_key
+      when:
+        - mysql_primary_backup_borg_account.rc == 0
+        - mysql_primary_backup_borg_ssh_directory.stat.isdir | default(false)
+
+    - name: Add the key on the backup server
+      ansible.builtin.lineinfile:
+        path: "/home/{{ borg_user }}/.ssh/authorized_keys"
+        line: >-
+          command="borg serve --restrict-to-path /var/backup/db",restrict
+          {{ mysql_primary_borg_public_key.content | b64decode | trim }}
+        create: true
+        owner: "{{ borg_user }}"
+        group: "{{ borg_user }}"
+        mode: "0600"
+      delegate_to: backup
+      notify: Run initial database backup
+      when:
+        - mysql_primary_borg_public_key is defined
+        - mysql_primary_borg_public_key.content is defined

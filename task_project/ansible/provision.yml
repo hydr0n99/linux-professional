@@ -1,0 +1,56 @@
+---
+- name: Configure the HTTPS entry point and load balancer
+  hosts: front
+  become: true
+  roles:
+    - common
+    - front
+
+- name: Configure WordPress backend back1
+  hosts: back1
+  become: true
+  roles:
+    - common
+    - wordpress_backend
+
+- name: Configure WordPress backend back2
+  hosts: back2
+  become: true
+  roles:
+    - common
+    - wordpress_backend
+
+- name: Configure the MySQL primary
+  hosts: db
+  become: true
+  roles:
+    - common
+    - mysql_primary
+
+- name: Configure the MySQL replica
+  hosts: replica
+  become: true
+  roles:
+    - common
+    - mysql_replica
+
+- name: Configure Prometheus, Alertmanager and Grafana
+  hosts: monitor
+  become: true
+  roles:
+    - common
+    - monitoring
+
+- name: Configure centralized logging and the local alert receiver
+  hosts: logger
+  become: true
+  roles:
+    - common
+    - log_server
+
+- name: Configure the Borg repository server
+  hosts: backup
+  become: true
+  roles:
+    - common
+    - backup_server

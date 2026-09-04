@@ -1,0 +1,56 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "type": "stat", "title": "Hosts up", "id": 1,
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0},
+      "targets": [{"expr": "sum(up{job=\"node\"})", "instant": true, "range": false, "refId": "A"}]
+    },
+    {
+      "type": "stat", "title": "HTTP endpoints up", "id": 2,
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0},
+      "targets": [{"expr": "sum(probe_success{job=\"http-probes\"})", "instant": true, "range": false, "refId": "A"}]
+    },
+    {
+      "type": "stat", "title": "MySQL replication", "id": 3,
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0},
+      "targets": [{"expr": "min({__name__=~\"project_mysql_replication_(io|sql)_running\"})", "instant": true, "range": false, "refId": "A"}]
+    },
+    {
+      "type": "stat", "title": "Last backup age (minutes)", "id": 4,
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0},
+      "targets": [{"expr": "(time() - project_backup_last_success_timestamp_seconds) / 60", "instant": true, "range": false, "refId": "A"}]
+    },
+    {
+      "type": "timeseries", "title": "CPU usage, %", "id": 5,
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "targets": [{"expr": "100 - avg by(instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100", "legendFormat": "{{ "{{instance}}" }}", "refId": "A"}]
+    },
+    {
+      "type": "timeseries", "title": "Available memory, %", "id": 6,
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "targets": [{"expr": "100 * node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes", "legendFormat": "{{ "{{instance}}" }}", "refId": "A"}]
+    },
+    {
+      "type": "timeseries", "title": "Root filesystem free, %", "id": 7,
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
+      "targets": [{"expr": "100 * node_filesystem_avail_bytes{mountpoint=\"/\"} / node_filesystem_size_bytes{mountpoint=\"/\"}", "legendFormat": "{{ "{{instance}}" }}", "refId": "A"}]
+    },
+    {
+      "type": "timeseries", "title": "Network receive, bytes/s", "id": 8,
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13},
+      "targets": [{"expr": "sum by(instance) (rate(node_network_receive_bytes_total{device!=\"lo\"}[5m]))", "legendFormat": "{{ "{{instance}}" }}", "refId": "A"}]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": ["project", "infrastructure"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timezone": "browser",
+  "title": "Project infrastructure overview",
+  "uid": "project-infrastructure",
+  "version": 1
+}

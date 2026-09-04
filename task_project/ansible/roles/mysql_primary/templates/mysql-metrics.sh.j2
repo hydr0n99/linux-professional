@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+output=/var/lib/prometheus/node-exporter/mysql.prom
+temporary="${output}.tmp"
+if mysqladmin --protocol=socket ping --silent >/dev/null 2>&1; then
+  value=1
+else
+  value=0
+fi
+printf '# HELP project_mysql_up Whether project MySQL is reachable.\n# TYPE project_mysql_up gauge\nproject_mysql_up %s\n' "$value" >"$temporary"
+chown prometheus:prometheus "$temporary"
+chmod 0644 "$temporary"
+mv "$temporary" "$output"

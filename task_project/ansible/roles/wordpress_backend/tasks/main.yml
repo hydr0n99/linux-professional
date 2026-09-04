@@ -1,0 +1,115 @@
+---
+- name: Install nginx and the PHP-FPM runtime
+  ansible.builtin.apt:
+    name:
+      - nginx
+      - php-fpm
+      - php-mysql
+      - php-curl
+      - php-gd
+      - php-xml
+      - php-mbstring
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Install the generic PHP provider after PHP-FPM
+  ansible.builtin.apt:
+    name: php
+    state: present
+
+- name: Install WordPress after its nginx and PHP dependencies
+  ansible.builtin.apt:
+    name: wordpress
+    state: present
+
+- name: Remove Apache packages left by earlier provisioning
+  ansible.builtin.apt:
+    name:
+      - apache2
+      - libapache2-mod-php
+      - libapache2-mod-php8.2
+    state: absent
+
+- name: Install the shared WordPress configuration
+  ansible.builtin.template:
+    src: wp-config.php.j2
+    dest: /usr/share/wordpress/wp-config.php
+    owner: root
+    group: www-data
+    mode: "0640"
+  notify: Restart php-fpm
+
+- name: Install the backend nginx configuration
+  ansible.builtin.template:
+    src: wordpress.conf.j2
+    dest: /etc/nginx/sites-available/wordpress.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload backend nginx
+
+- name: Enable the WordPress virtual host
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/wordpress.conf
+    dest: /etc/nginx/sites-enabled/wordpress.conf
+    state: link
+  notify: Reload backend nginx
+
+- name: Disable the default nginx virtual host
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: Reload backend nginx
+
+- name: Install the idempotent WordPress bootstrap script
+  ansible.builtin.template:
+    src: wordpress-bootstrap.sh.j2
+    dest: /usr/local/sbin/wordpress-bootstrap
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Install the WordPress bootstrap service
+  ansible.builtin.template:
+    src: wordpress-bootstrap.service.j2
+    dest: /etc/systemd/system/wordpress-bootstrap.service
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install the WordPress bootstrap timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/wordpress-bootstrap.timer
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Retry WordPress installation until MySQL is available
+
+      [Timer]
+      OnBootSec=30s
+      OnUnitActiveSec=60s
+      Unit=wordpress-bootstrap.service
+
+      [Install]
+      WantedBy=timers.target
+
+- name: Validate the backend nginx configuration
+  ansible.builtin.command: nginx -t
+  changed_when: false
+
+- name: Enable backend services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+  loop:
+    - php8.2-fpm
+    - nginx
+    - wordpress-bootstrap.timer
+
+- name: Apply pending backend configuration
+  ansible.builtin.meta: flush_handlers

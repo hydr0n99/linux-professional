@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+curl --fail --silent --show-error --max-time 20 \
+  --header 'Host: localhost' \
+  --header 'X-Forwarded-Proto: https' \
+  --data-urlencode 'weblog_title={{ wordpress_title }}' \
+  --data-urlencode 'user_name={{ wordpress_admin_user }}' \
+  --data-urlencode 'admin_password={{ wordpress_admin_password }}' \
+  --data-urlencode 'admin_password2={{ wordpress_admin_password }}' \
+  --data-urlencode 'admin_email={{ wordpress_admin_email }}' \
+  --data-urlencode 'blog_public=0' \
+  'http://127.0.0.1/wp-admin/install.php?step=2' >/dev/null

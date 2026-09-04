@@ -1,0 +1,11 @@
+[Unit]
+Description=Idempotently initialize the WordPress database
+After=network-online.target nginx.service php8.2-fpm.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/wordpress-bootstrap
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wordpress-bootstrap

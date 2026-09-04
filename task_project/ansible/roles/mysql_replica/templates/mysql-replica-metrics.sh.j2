@@ -1,0 +1,25 @@
+#!/bin/bash
+set -u
+
+output=/var/lib/prometheus/node-exporter/mysql.prom
+temporary="${output}.tmp"
+if mysqladmin --protocol=socket ping --silent >/dev/null 2>&1; then
+  mysql_up=1
+  io_up=$(mysql --protocol=socket -NBe \
+    "SELECT IF(COUNT(*) > 0 AND MIN(SERVICE_STATE = 'ON') = 1, 1, 0) FROM performance_schema.replication_connection_status" 2>/dev/null || printf 0)
+  sql_up=$(mysql --protocol=socket -NBe \
+    "SELECT IF(COUNT(*) > 0 AND MIN(SERVICE_STATE = 'ON') = 1, 1, 0) FROM performance_schema.replication_applier_status_by_worker" 2>/dev/null || printf 0)
+else
+  mysql_up=0
+  io_up=0
+  sql_up=0
+fi
+
+cat >"$temporary" <<EOF
+project_mysql_up $mysql_up
+project_mysql_replication_io_running $io_up
+project_mysql_replication_sql_running $sql_up
+EOF
+chown prometheus:prometheus "$temporary"
+chmod 0644 "$temporary"
+mv "$temporary" "$output"

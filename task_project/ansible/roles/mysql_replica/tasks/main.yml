@@ -1,0 +1,269 @@
+---
+- name: Install MySQL APT repository prerequisites
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - gnupg
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the APT keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the Oracle MySQL repository signing key
+  ansible.builtin.get_url:
+    url: https://repo.mysql.com/RPM-GPG-KEY-mysql-2025
+    dest: /etc/apt/keyrings/mysql.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure the Oracle MySQL 8.0 repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch=amd64 signed-by=/etc/apt/keyrings/mysql.asc]
+      http://repo.mysql.com/apt/debian/ bookworm mysql-8.0
+    filename: mysql-community
+    state: present
+    update_cache: true
+
+- name: Select socket authentication for the MySQL root account
+  ansible.builtin.debconf:
+    name: mysql-community-server
+    question: "{{ item }}"
+    value: ""
+    vtype: password
+  loop:
+    - mysql-community-server/root-pass
+    - mysql-community-server/re-root-pass
+
+- name: Install native MySQL replica packages
+  ansible.builtin.apt:
+    name:
+      - mysql-server
+      - mysql-client
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Detect an initialized replica
+  ansible.builtin.stat:
+    path: /var/lib/mysql/.project-ready
+  register: mysql_replica_ready
+
+- name: Install replica MySQL configuration
+  ansible.builtin.template:
+    src: mysql-replica.cnf.j2
+    dest: /etc/mysql/mysql.conf.d/90-project.cnf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart replica MySQL
+
+- name: Forward the native MySQL error log through rsyslog
+  ansible.builtin.copy:
+    dest: /etc/rsyslog.d/70-mysql-file.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      input(
+        type="imfile"
+        File="/var/log/mysql/error.log"
+        Tag="mysql-replica:"
+        Severity="error"
+        Facility="local5"
+      )
+  notify: Restart rsyslog for replica MySQL
+
+- name: Enable native replica MySQL
+  ansible.builtin.systemd:
+    name: mysql
+    state: started
+    enabled: true
+
+- name: Apply replica MySQL configuration before health checks
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait until replica MySQL accepts local connections
+  ansible.builtin.command:
+    argv:
+      - mysqladmin
+      - --protocol=socket
+      - ping
+      - --silent
+  register: mysql_replica_health
+  changed_when: false
+  retries: 40
+  delay: 3
+  until: mysql_replica_health.rc == 0
+
+- name: Temporarily make replica writable for idempotent provisioning
+  ansible.builtin.command:
+    argv:
+      - mysql
+      - --protocol=socket
+      - -e
+      - SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF;
+  changed_when: false
+
+- name: Check whether the primary is reachable
+  ansible.builtin.wait_for:
+    host: "{{ mysql_primary_ip }}"
+    port: 3306
+    connect_timeout: 1
+    timeout: 10
+  register: mysql_replica_primary_reachable
+  failed_when: false
+  changed_when: false
+
+- name: Seed a rebuilt replica from the primary
+  when:
+    - not mysql_replica_ready.stat.exists
+    - mysql_replica_primary_reachable.state | default('') == 'started'
+  block:
+    - name: Create a GTID-aware dump on the primary
+      ansible.builtin.shell: >-
+        mysqldump --protocol=socket
+        --single-transaction --routines --events
+        --set-gtid-purged=ON --databases {{ wordpress_database }}
+        > /tmp/wordpress-replica-seed.sql
+      args:
+        executable: /bin/bash
+      delegate_to: db
+      changed_when: true
+
+    - name: Fetch the seed dump to the controller
+      ansible.builtin.fetch:
+        src: /tmp/wordpress-replica-seed.sql
+        dest: /tmp/wordpress-replica-seed.sql
+        flat: true
+      delegate_to: db
+
+    - name: Upload the seed dump to the replica
+      ansible.builtin.copy:
+        src: /tmp/wordpress-replica-seed.sql
+        dest: /tmp/wordpress-replica-seed.sql
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Clear replica GTID history before seeding
+      ansible.builtin.command:
+        argv:
+          - mysql
+          - --protocol=socket
+          - -e
+          - RESET REPLICA ALL; RESET MASTER;
+      changed_when: true
+
+    - name: Import the primary seed on the replica
+      ansible.builtin.shell: >-
+        mysql --protocol=socket
+        < /tmp/wordpress-replica-seed.sql
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+- name: Stop the existing replication channel if present
+  ansible.builtin.command:
+    argv:
+      - mysql
+      - --protocol=socket
+      - -e
+      - STOP REPLICA;
+  changed_when: false
+  failed_when: false
+  when: mysql_replica_primary_reachable.state | default('') == 'started'
+
+- name: Configure GTID replication from the primary
+  ansible.builtin.command:
+    argv:
+      - mysql
+      - --protocol=socket
+      - -e
+      - >-
+        CHANGE REPLICATION SOURCE TO
+          SOURCE_HOST='{{ mysql_primary_ip }}',
+          SOURCE_PORT=3306,
+          SOURCE_USER='{{ mysql_replication_user }}',
+          SOURCE_PASSWORD='{{ mysql_replication_password }}',
+          SOURCE_AUTO_POSITION=1,
+          GET_SOURCE_PUBLIC_KEY=1;
+        START REPLICA;
+  changed_when: false
+  when: mysql_replica_primary_reachable.state | default('') == 'started'
+
+- name: Restore replica read-only safeguards
+  ansible.builtin.command:
+    argv:
+      - mysql
+      - --protocol=socket
+      - -e
+      - SET GLOBAL read_only=ON; SET GLOBAL super_read_only=ON;
+  changed_when: false
+
+- name: Mark replica initialization as complete
+  ansible.builtin.file:
+    path: /var/lib/mysql/.project-ready
+    state: touch
+    owner: root
+    group: root
+    mode: "0600"
+    modification_time: preserve
+    access_time: preserve
+  when: mysql_replica_primary_reachable.state | default('') == 'started'
+
+- name: Install replica metrics collector
+  ansible.builtin.template:
+    src: mysql-replica-metrics.sh.j2
+    dest: /usr/local/sbin/mysql-project-metrics
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Install replica metrics service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/mysql-project-metrics.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Export MySQL replica state for node_exporter
+      After=mysql.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/mysql-project-metrics
+
+- name: Install replica metrics timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/mysql-project-metrics.timer
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Collect MySQL replica metrics every 30 seconds
+
+      [Timer]
+      OnBootSec=30s
+      OnUnitActiveSec=30s
+      Unit=mysql-project-metrics.service
+
+      [Install]
+      WantedBy=timers.target
+
+- name: Enable the replica metrics timer
+  ansible.builtin.systemd:
+    name: mysql-project-metrics.timer
+    state: started
+    enabled: true
+    daemon_reload: true

@@ -1,0 +1,47 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alert-rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["127.0.0.1:9093"]
+
+scrape_configs:
+  - job_name: node
+    static_configs:
+      - targets:
+          - "{{ front_internal_ip }}:9100"
+          - "{{ back1_internal_ip }}:9100"
+          - "{{ back2_internal_ip }}:9100"
+          - "{{ mysql_primary_ip }}:9100"
+          - "{{ mysql_replica_ip }}:9100"
+          - "{{ monitor_ip }}:9100"
+          - "{{ logger_ip }}:9100"
+          - "{{ backup_ip }}:9100"
+
+  - job_name: http-probes
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - https://{{ front_internal_ip }}/
+          - http://{{ back1_internal_ip }}/healthz
+          - http://{{ back2_internal_ip }}/healthz
+          - http://{{ logger_ip }}:3100/ready
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+
+  - job_name: loki
+    static_configs:
+      - targets:
+          - "{{ logger_ip }}:3100"

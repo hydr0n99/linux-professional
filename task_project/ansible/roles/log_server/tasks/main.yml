@@ -1,0 +1,266 @@
+---
+- name: Remove the unavailable Grafana APT repository configuration
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/apt/sources.list.d/grafana.list
+    - /etc/apt/keyrings/grafana.asc
+
+- name: Install centralized logging prerequisites
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - logrotate
+      - python3
+      - rsyslog
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Download the pinned Loki and Alloy packages
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+    checksum: "{{ item.checksum }}"
+  loop:
+    - name: Loki
+      url: "{{ loki_deb_url }}"
+      dest: "/var/cache/apt/archives/loki_{{ loki_version }}_amd64.deb"
+      checksum: "{{ loki_deb_checksum }}"
+    - name: Grafana Alloy
+      url: "{{ alloy_deb_url }}"
+      dest: "/var/cache/apt/archives/alloy_{{ alloy_version }}_amd64.deb"
+      checksum: "{{ alloy_deb_checksum }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Install the pinned Loki and Alloy packages
+  ansible.builtin.apt:
+    deb: "{{ item }}"
+    state: present
+  loop:
+    - "/var/cache/apt/archives/loki_{{ loki_version }}_amd64.deb"
+    - "/var/cache/apt/archives/alloy_{{ alloy_version }}_amd64.deb"
+
+- name: Create the dedicated Loki system group
+  ansible.builtin.group:
+    name: loki
+    state: present
+    system: true
+
+- name: Assign the Loki service account to its dedicated group
+  ansible.builtin.user:
+    name: loki
+    group: loki
+  notify: Restart Loki
+
+- name: Grant Alloy access to remote files and the system journal
+  ansible.builtin.user:
+    name: alloy
+    groups:
+      - adm
+      - systemd-journal
+    append: true
+  notify: Restart Alloy
+
+- name: Create the remote log root
+  ansible.builtin.file:
+    path: /var/log/remote
+    state: directory
+    owner: root
+    group: adm
+    mode: "0770"
+
+- name: Configure the central rsyslog receiver
+  ansible.builtin.template:
+    src: central-server.conf.j2
+    dest: /etc/rsyslog.d/10-central-server.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart central rsyslog
+
+- name: Configure rotation of remote logs
+  ansible.builtin.copy:
+    dest: /etc/logrotate.d/project-remote
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      /var/log/remote/*/*.log {
+          daily
+          rotate 14
+          compress
+          delaycompress
+          missingok
+          notifempty
+          sharedscripts
+          postrotate
+              /usr/lib/rsyslog/rsyslog-rotate
+          endscript
+      }
+
+- name: Discover existing remote host log directories
+  ansible.builtin.find:
+    paths: /var/log/remote
+    file_type: directory
+    recurse: false
+  register: log_server_remote_host_directories
+
+- name: Repair access to existing remote host log directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: root
+    group: adm
+    mode: "0750"
+  loop: "{{ log_server_remote_host_directories.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+  notify: Restart Alloy
+
+- name: Validate the central rsyslog configuration
+  ansible.builtin.command:
+    argv:
+      - rsyslogd
+      - -N1
+  changed_when: false
+
+- name: Apply the central rsyslog receiver configuration
+  ansible.builtin.meta: flush_handlers
+
+- name: Inspect the central rsyslog TCP listener
+  ansible.builtin.command:
+    argv:
+      - ss
+      - -H
+      - -ltn
+      - sport
+      - "="
+      - :514
+  register: log_server_rsyslog_tcp_listener
+  changed_when: false
+
+- name: Recover the central rsyslog listener after an interrupted provision
+  ansible.builtin.systemd:
+    name: rsyslog
+    state: restarted
+  when: log_server_rsyslog_tcp_listener.stdout | trim == ""
+
+- name: Wait for the central rsyslog TCP listener
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: 514
+    state: started
+    timeout: 15
+
+- name: Create Loki storage directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: loki
+    group: loki
+    mode: "0750"
+  loop:
+    - /var/lib/loki
+    - /var/lib/loki/chunks
+    - /var/lib/loki/rules
+    - /var/lib/loki/compactor
+
+- name: Configure single-node Loki
+  ansible.builtin.template:
+    src: loki.yml.j2
+    dest: /etc/loki/config.yml
+    owner: root
+    group: loki
+    mode: "0640"
+  notify: Restart Loki
+
+- name: Configure Grafana Alloy log collection
+  ansible.builtin.template:
+    src: config.alloy.j2
+    dest: /etc/alloy/config.alloy
+    owner: root
+    group: alloy
+    mode: "0640"
+  notify: Restart Alloy
+
+- name: Validate the Loki configuration
+  ansible.builtin.command:
+    argv:
+      - loki
+      - -config.file
+      - /etc/loki/config.yml
+      - -verify-config=true
+  changed_when: false
+
+- name: Validate the Alloy configuration
+  ansible.builtin.command:
+    argv:
+      - alloy
+      - validate
+      - /etc/alloy/config.alloy
+  changed_when: false
+
+- name: Install the local Alertmanager webhook receiver
+  ansible.builtin.template:
+    src: alert-webhook.py.j2
+    dest: /usr/local/sbin/alert-webhook
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart alert webhook
+
+- name: Install the alert webhook unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/alert-webhook.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Receive Alertmanager webhooks and write them to syslog
+      After=network-online.target rsyslog.service
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/bin/python3 /usr/local/sbin/alert-webhook
+      Restart=always
+      RestartSec=3
+      User=nobody
+      Group=nogroup
+
+      [Install]
+      WantedBy=multi-user.target
+  notify: Restart alert webhook
+
+- name: Enable the central logging services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+  loop:
+    - rsyslog
+    - loki
+    - alloy
+    - alert-webhook
+
+- name: Apply pending logging configuration
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for Loki and Alloy
+  ansible.builtin.uri:
+    url: "{{ item }}"
+    status_code: 200
+  register: log_server_service_endpoint
+  retries: 30
+  delay: 2
+  until: log_server_service_endpoint.status == 200
+  loop:
+    - "http://{{ logger_ip }}:3100/ready"
+    - http://127.0.0.1:12345/-/ready

@@ -1,0 +1,21 @@
+---
+- name: Restart central rsyslog
+  ansible.builtin.systemd:
+    name: rsyslog
+    state: restarted
+
+- name: Restart alert webhook
+  ansible.builtin.systemd:
+    name: alert-webhook
+    state: restarted
+    daemon_reload: true
+
+- name: Restart Loki
+  ansible.builtin.systemd:
+    name: loki
+    state: restarted
+
+- name: Restart Alloy
+  ansible.builtin.systemd:
+    name: alloy
+    state: restarted

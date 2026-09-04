@@ -1,0 +1,95 @@
+---
+- name: Install entry-point services
+  ansible.builtin.apt:
+    name:
+      - nginx
+      - nftables
+      - openssl
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the TLS private directory
+  ansible.builtin.file:
+    path: /etc/nginx/tls
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Generate a self-signed certificate
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -x509
+      - -nodes
+      - -newkey
+      - rsa:2048
+      - -days
+      - "3650"
+      - -keyout
+      - /etc/nginx/tls/project.key
+      - -out
+      - /etc/nginx/tls/project.crt
+      - -subj
+      - /CN=localhost
+      - -addext
+      - subjectAltName=DNS:localhost,IP:127.0.0.1,IP:{{ front_dmz_ip }},IP:{{ front_internal_ip }}
+  args:
+    creates: /etc/nginx/tls/project.crt
+  notify: Reload nginx
+
+- name: Restrict the TLS private key
+  ansible.builtin.file:
+    path: /etc/nginx/tls/project.key
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Install the load balancer configuration
+  ansible.builtin.template:
+    src: project.conf.j2
+    dest: /etc/nginx/sites-available/project.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload nginx
+
+- name: Enable the project virtual host
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/project.conf
+    dest: /etc/nginx/sites-enabled/project.conf
+    state: link
+  notify: Reload nginx
+
+- name: Disable the default virtual host
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: Reload nginx
+
+- name: Validate the nginx configuration
+  ansible.builtin.command: nginx -t
+  changed_when: false
+
+- name: Install the ingress firewall policy
+  ansible.builtin.template:
+    src: nftables.conf.j2
+    dest: /etc/nftables.conf
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Reload nftables
+
+- name: Enable the entry-point services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop:
+    - nginx
+    - nftables
+
+- name: Apply pending entry-point configuration
+  ansible.builtin.meta: flush_handlers

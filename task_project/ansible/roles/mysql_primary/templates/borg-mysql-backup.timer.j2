@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically back up MySQL with Borg
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec={{ borg_backup_interval }}
+Persistent=true
+Unit=borg-mysql-backup.service
+
+[Install]
+WantedBy=timers.target

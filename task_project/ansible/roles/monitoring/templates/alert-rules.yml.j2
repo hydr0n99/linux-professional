@@ -1,0 +1,66 @@
+groups:
+  - name: infrastructure
+    rules:
+      - alert: HostDown
+        expr: up{job="node"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node exporter is unavailable on {{ "{{ $labels.instance }}" }}"
+
+      - alert: HttpEndpointDown
+        expr: probe_success{job="http-probes"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "HTTP endpoint is unavailable: {{ "{{ $labels.instance }}" }}"
+
+      - alert: RootFilesystemLow
+        expr: 100 * node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} < 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Less than 10% free space on {{ "{{ $labels.instance }}" }}"
+
+      - alert: CpuLoadHigh
+        expr: 100 - avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100 > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU usage is above 90% on {{ "{{ $labels.instance }}" }}"
+
+      - alert: MySQLDown
+        expr: project_mysql_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MySQL is unavailable on {{ "{{ $labels.instance }}" }}"
+
+      - alert: MySQLReplicationStopped
+        expr: project_mysql_replication_io_running == 0 or project_mysql_replication_sql_running == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MySQL replication is not healthy on {{ "{{ $labels.instance }}" }}"
+
+      - alert: BackupStale
+        expr: time() - project_backup_last_success_timestamp_seconds > 1800
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No successful database backup for more than 30 minutes"
+
+      - alert: BackupNeverCompleted
+        expr: absent(project_backup_last_success_timestamp_seconds)
+        for: 20m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No successful database backup has been observed"

@@ -1,0 +1,22 @@
+module(load="imtcp")
+module(load="imudp")
+input(type="imtcp" port="514")
+input(type="imudp" port="514")
+
+template(
+  name="ProjectRemoteFile"
+  type="string"
+  string="/var/log/remote/%HOSTNAME:::secpath-replace%/%PROGRAMNAME:::secpath-replace%.log"
+)
+
+if ($fromhost-ip != '127.0.0.1') then {
+  action(
+    type="omfile"
+    dynaFile="ProjectRemoteFile"
+    dirCreateMode="0750"
+    dirGroup="adm"
+    fileCreateMode="0640"
+    fileGroup="adm"
+  )
+  stop
+}
